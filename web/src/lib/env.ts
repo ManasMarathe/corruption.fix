@@ -25,6 +25,13 @@ const rawEnvSchema = z.object({
   VAULT_ENCRYPTION_KEY: hex64.optional(),
   VAULT_HMAC_KEY: hex64.optional(),
   CHECKPOINT_SIGNING_KEY: hex64.optional(),
+  // Public half of CHECKPOINT_SIGNING_KEY, safe to expose. Shown on
+  // /transparency so anyone can independently verify checkpoint signatures
+  // without trusting this server. Not derived automatically from the
+  // signing key at boot (that key may live only in a secret store the app
+  // process can read but shouldn't need Node crypto glue for at startup);
+  // generate both together via scripts/generate-signing-key.mjs.
+  CHECKPOINT_PUBLIC_KEY: hex64.optional(),
   JOB_SECRET: z.string().min(1).optional(),
   SESSION_SECRET: z.string().min(1, "SESSION_SECRET is required"),
   // OTP email delivery. Genuinely optional in all environments: when unset
@@ -90,6 +97,7 @@ function loadEnv() {
     // Not required anywhere yet — the checkpoint-signing feature lands in a
     // later phase. Left undefined when unset rather than given a fallback.
     CHECKPOINT_SIGNING_KEY: data.CHECKPOINT_SIGNING_KEY,
+    CHECKPOINT_PUBLIC_KEY: data.CHECKPOINT_PUBLIC_KEY,
     JOB_SECRET: requireOrWarn(
       data.JOB_SECRET,
       DEV_FALLBACK_JOB_SECRET,

@@ -36,14 +36,29 @@ export const drizzleRateLimitStore: RateLimitStore = {
   async bump(key, now, windowSec) {
     const cutoff = new Date(now.getTime() - windowSec * 1000);
 
+    // drizzle-orm's postgres-js driver deliberately disables postgres.js's
+    // own Date -> timestamptz serialization (it registers a no-op
+    // "transparentParser" for the timestamptz OID — see
+    // node_modules/drizzle-orm/postgres-js/driver.js) because it expects
+    // to have already converted Date values to strings itself via each
+    // column's driver-value mapping. That mapping only runs for values
+    // passed through `.values()`/typed column helpers — a raw `Date`
+    // interpolated directly into a `sql` template (as `cutoff`/`now` are
+    // here) bypasses it entirely and reaches postgres.js unconverted,
+    // which then throws ("argument must be of type string ... received
+    // Date") deep in wire-protocol encoding. Interpolating `.toISOString()`
+    // strings instead sidesteps the gap.
+    const nowIso = now.toISOString();
+    const cutoffIso = cutoff.toISOString();
+
     const rows = await db
       .insert(rateLimits)
       .values({ key, windowStart: now, count: 1 })
       .onConflictDoUpdate({
         target: rateLimits.key,
         set: {
-          windowStart: sql`CASE WHEN ${rateLimits.windowStart} <= ${cutoff} THEN ${now} ELSE ${rateLimits.windowStart} END`,
-          count: sql`CASE WHEN ${rateLimits.windowStart} <= ${cutoff} THEN 1 ELSE ${rateLimits.count} + 1 END`,
+          windowStart: sql`CASE WHEN ${rateLimits.windowStart} <= ${cutoffIso} THEN ${nowIso} ELSE ${rateLimits.windowStart} END`,
+          count: sql`CASE WHEN ${rateLimits.windowStart} <= ${cutoffIso} THEN 1 ELSE ${rateLimits.count} + 1 END`,
         },
       })
       .returning({ windowStart: rateLimits.windowStart, count: rateLimits.count });
