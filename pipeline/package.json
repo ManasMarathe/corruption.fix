@@ -1,0 +1,18 @@
+{
+  "name": "corruptionfix-pipeline",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Seed-data pipeline: OSM -> offices table + vector tiles for CorruptionFix.",
+  "scripts": {
+    "download": "bash 01-download.sh",
+    "extract": "bash 02-extract.sh",
+    "import": "node 03-import.mjs",
+    "tiles": "bash 04-tiles.sh",
+    "all": "npm run download && npm run extract && npm run import && npm run tiles"
+  },
+  "dependencies": {
+    "postgres": "^3.4.9",
+    "uuid": "^14.0.2"
+  }
+}
