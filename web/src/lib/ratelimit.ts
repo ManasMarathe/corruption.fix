@@ -35,6 +35,19 @@ export interface RateLimitStore {
 export const drizzleRateLimitStore: RateLimitStore = {
   async bump(key, now, windowSec) {
     const cutoff = new Date(now.getTime() - windowSec * 1000);
+    // Pre-serialize to ISO strings before interpolating into the raw `sql`
+    // CASE fragments below. Values that flow through drizzle's `.values()`
+    // get the `timestamp` column's date-mode serialization automatically,
+    // but a Date interpolated directly into a `sql` template is handed to
+    // postgres.js as-is; here it ends up bound to a parameter position
+    // whose inferred type postgres.js has no built-in Date serializer for
+    // (it appears alongside a column reference inside CASE/THEN, not in a
+    // typed column position), which throws
+    // `TypeError [ERR_INVALID_ARG_TYPE]: ... Received an instance of Date`
+    // deep in postgres.js's Bind-message encoding. A plain string parameter
+    // never hits that path.
+    const cutoffIso = cutoff.toISOString();
+    const nowIso = now.toISOString();
 
     const rows = await db
       .insert(rateLimits)
@@ -42,8 +55,8 @@ export const drizzleRateLimitStore: RateLimitStore = {
       .onConflictDoUpdate({
         target: rateLimits.key,
         set: {
-          windowStart: sql`CASE WHEN ${rateLimits.windowStart} <= ${cutoff} THEN ${now} ELSE ${rateLimits.windowStart} END`,
-          count: sql`CASE WHEN ${rateLimits.windowStart} <= ${cutoff} THEN 1 ELSE ${rateLimits.count} + 1 END`,
+          windowStart: sql`CASE WHEN ${rateLimits.windowStart} <= ${cutoffIso} THEN ${nowIso} ELSE ${rateLimits.windowStart} END`,
+          count: sql`CASE WHEN ${rateLimits.windowStart} <= ${cutoffIso} THEN 1 ELSE ${rateLimits.count} + 1 END`,
         },
       })
       .returning({ windowStart: rateLimits.windowStart, count: rateLimits.count });
