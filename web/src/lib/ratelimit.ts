@@ -35,7 +35,6 @@ export interface RateLimitStore {
 export const drizzleRateLimitStore: RateLimitStore = {
   async bump(key, now, windowSec) {
     const cutoff = new Date(now.getTime() - windowSec * 1000);
-
     // drizzle-orm's postgres-js driver deliberately disables postgres.js's
     // own Date -> timestamptz serialization (it registers a no-op
     // "transparentParser" for the timestamptz OID — see
