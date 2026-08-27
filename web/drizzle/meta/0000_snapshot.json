@@ -887,7 +887,7 @@
     },
     "vault.reporter_identities": {
       "name": "reporter_identities",
-      "schema": "vault",
+      "schema": "identity_vault",
       "columns": {
         "id": {
           "name": "id",
@@ -1129,7 +1129,7 @@
     },
     "vault.vault_access_log": {
       "name": "vault_access_log",
-      "schema": "vault",
+      "schema": "identity_vault",
       "columns": {
         "id": {
           "name": "id",
@@ -1174,7 +1174,7 @@
   },
   "enums": {},
   "schemas": {
-    "vault": "vault"
+    "identity_vault": "identity_vault"
   },
   "sequences": {},
   "roles": {},

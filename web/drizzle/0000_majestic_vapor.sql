@@ -1,7 +1,7 @@
 -- Required for the `geometry` column type used by "offices".
 CREATE EXTENSION IF NOT EXISTS postgis;
 --> statement-breakpoint
-CREATE SCHEMA IF NOT EXISTS "vault";
+CREATE SCHEMA IF NOT EXISTS "identity_vault";
 --> statement-breakpoint
 CREATE TABLE "chain_checkpoints" (
 	"id" uuid PRIMARY KEY NOT NULL,
@@ -118,7 +118,7 @@ CREATE TABLE "rate_limits" (
 	"count" integer DEFAULT 0 NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "vault"."reporter_identities" (
+CREATE TABLE "identity_vault"."reporter_identities" (
 	"id" uuid PRIMARY KEY NOT NULL,
 	"email_enc" text NOT NULL,
 	"email_hmac" text NOT NULL,
@@ -156,7 +156,7 @@ CREATE TABLE "takedown_requests" (
 	CONSTRAINT "takedown_requests_status_check" CHECK ("takedown_requests"."status" in ('open','actioned','rejected'))
 );
 --> statement-breakpoint
-CREATE TABLE "vault"."vault_access_log" (
+CREATE TABLE "identity_vault"."vault_access_log" (
 	"id" uuid PRIMARY KEY NOT NULL,
 	"reporter_id" uuid NOT NULL,
 	"accessor" text NOT NULL,

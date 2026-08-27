@@ -16,7 +16,7 @@ export default defineConfig({
   schema: "./src/db/schema.ts",
   out: "./drizzle",
   dialect: "postgresql",
-  schemaFilter: ["public", "vault"],
+  schemaFilter: ["public", "identity_vault"],
   dbCredentials: {
     url: databaseUrl,
   },

@@ -41,3 +41,4 @@ next-env.d.ts
 # Postgres data (if run locally via docker volume mount)
 pgdata/
 .claude/
+.env*

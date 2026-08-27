@@ -27,7 +27,10 @@ import { geometryPoint } from "./geometry";
 // has no foreign key into this schema.
 // ---------------------------------------------------------------------------
 
-export const vault = pgSchema("vault");
+// Named `identity_vault` (not `vault`) because Supabase reserves a `vault`
+// schema for its own secrets extension (owned by supabase_admin, not
+// writable by the app's role).
+export const vault = pgSchema("identity_vault");
 
 export const reporterIdentities = vault.table("reporter_identities", {
   id: uuid("id").primaryKey(),
