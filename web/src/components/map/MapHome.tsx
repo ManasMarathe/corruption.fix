@@ -358,11 +358,18 @@ export function MapHome() {
 
   function focusFromQueryParams(map: MapLibreMap) {
     const params = new URLSearchParams(window.location.search);
-    const lat = Number(params.get("lat"));
-    const lng = Number(params.get("lng"));
+    // Guard against absent params before Number(): Number(null) is 0, not
+    // NaN, so a bare "/" would otherwise jump to [0,0] at zoom 0 and open
+    // an empty popup over the Gulf of Guinea.
+    const latRaw = params.get("lat");
+    const lngRaw = params.get("lng");
+    if (latRaw === null || lngRaw === null) return;
+    const lat = Number(latRaw);
+    const lng = Number(lngRaw);
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
 
-    const zoomParam = Number(params.get("zoom"));
+    const zoomRaw = params.get("zoom");
+    const zoomParam = zoomRaw === null ? NaN : Number(zoomRaw);
     const name = params.get("name") ?? "";
     const category = (params.get("category") as OfficeCategory | null) ?? "other";
     const id = params.get("id");
@@ -392,7 +399,12 @@ export function MapHome() {
 
   return (
     <div className="relative w-full h-dvh overflow-hidden">
-      <div ref={containerRef} className="absolute inset-0" />
+      {/* w-full/h-full are load-bearing: maplibre-gl.css sets `.maplibregl-map
+          { position: relative }`, and depending on CSS bundle order it can win
+          over Tailwind's `.absolute`, collapsing an inset-0-sized container to
+          height 0 (map never renders, "Loading map…" never clears). Explicit
+          dimensions keep the container full-bleed under either position. */}
+      <div ref={containerRef} className="absolute inset-0 w-full h-full" />
 
       {!loaded ? (
         <div className="absolute inset-0 flex items-center justify-center bg-white dark:bg-neutral-950 text-sm text-black/60 dark:text-white/60 z-30">
