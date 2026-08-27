@@ -12,7 +12,12 @@ import type { NextConfig } from "next";
 //   inline <style> for its canvas/marker CSS.
 const CSP = [
   "default-src 'self'",
-  "script-src 'self'",
+  // 'unsafe-inline' is required by Next.js itself: the App Router streams
+  // its RSC/flight payload and hydration bootstrap as inline <script> tags,
+  // so a bare 'self' blocks hydration and no client component ever mounts.
+  // The stricter alternative is a per-request nonce via middleware; adopt
+  // that if/when a middleware layer is added for other reasons.
+  "script-src 'self' 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https://tiles.openfreemap.org",
   "font-src 'self' data:",
