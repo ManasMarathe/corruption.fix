@@ -53,7 +53,8 @@ Defined and validated in `web/src/lib/env.ts`. See `web/.env.example` for a fill
 | `DATABASE_URL` | always | Postgres connection URL | e.g. `postgres://localhost:5432/corruptionfix` |
 | `VAULT_ENCRYPTION_KEY` | production only | 64-char hex (32 bytes) | Encrypts reporter identity fields (email/phone) at rest in the `vault` schema. Falls back to an insecure dev default outside production (with a warning) if unset. |
 | `VAULT_HMAC_KEY` | production only | 64-char hex (32 bytes) | HMACs reporter identity fields for lookup/dedup without plaintext. Same dev fallback behavior as above. |
-| `CHECKPOINT_SIGNING_KEY` | no | 64-char hex (32 bytes) | Signs chain checkpoints. Used by a later phase; safe to leave unset for now. |
+| `CHECKPOINT_SIGNING_KEY` | no | 64-char hex (32 bytes) | Ed25519 private "seed" for signing chain checkpoints (the `sign-checkpoint` job). Generate a matched pair with `node scripts/generate-signing-key.mjs` — never commit this value. Safe to leave unset; the job skips cleanly when it is. |
+| `CHECKPOINT_PUBLIC_KEY` | no | 64-char hex (32 bytes) | Public half of `CHECKPOINT_SIGNING_KEY`, produced by the same script. Safe to publish — shown on `/transparency` so anyone can independently verify checkpoint signatures. |
 | `JOB_SECRET` | production only | non-empty string | Bearer token required by `/api/jobs/*` routes, called by the scheduled GitHub Actions workflow. Falls back to an insecure dev default outside production (with a warning) if unset. |
 | `SESSION_SECRET` | always | non-empty string | Signs/derives session tokens. |
 | `NODE_ENV` | always | `development` \| `test` \| `production` | Defaults to `development`. |
@@ -62,6 +63,12 @@ Generate a fresh hex key with:
 
 ```bash
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+`CHECKPOINT_SIGNING_KEY`/`CHECKPOINT_PUBLIC_KEY` are a matched Ed25519 pair rather than independent random values, so generate them together instead:
+
+```bash
+node scripts/generate-signing-key.mjs
 ```
 
 ## Scripts (run from `web/`)
