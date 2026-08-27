@@ -51,7 +51,14 @@ const DEV_FALLBACK_VAULT_HMAC_KEY = "beef".repeat(16);
 const DEV_FALLBACK_JOB_SECRET = "dev-job-secret-do-not-use-in-production";
 
 function loadEnv() {
-  const parsed = rawEnvSchema.safeParse(process.env);
+  // The Vercel <-> Supabase integration injects the pooled connection
+  // string as POSTGRES_URL rather than DATABASE_URL; accept it as a
+  // fallback so the integration works without manual re-mapping. An
+  // explicit DATABASE_URL always wins.
+  const parsed = rawEnvSchema.safeParse({
+    ...process.env,
+    DATABASE_URL: process.env.DATABASE_URL ?? process.env.POSTGRES_URL,
+  });
 
   if (!parsed.success) {
     const issues = parsed.error.issues
