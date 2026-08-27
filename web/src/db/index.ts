@@ -12,7 +12,18 @@ const globalForDb = globalThis as unknown as {
 
 const queryClient =
   globalForDb.__corruptionfixQueryClient ??
-  postgres(env.DATABASE_URL, { max: env.NODE_ENV === "production" ? 10 : 5 });
+  postgres(env.DATABASE_URL, {
+    max: env.NODE_ENV === "production" ? 10 : 5,
+    // Supabase's connection pooler (Supavisor, transaction mode — the URL
+    // Vercel should use) multiplexes many clients over few server
+    // connections and therefore can't support session-scoped prepared
+    // statements. postgres.js prepares every query by default, so leave it
+    // off; also applies cleanly to direct connections.
+    prepare: false,
+    // In a serverless runtime, idle connections in a frozen instance just
+    // hold pooler slots — release them quickly.
+    idle_timeout: 20,
+  });
 
 if (env.NODE_ENV !== "production") {
   globalForDb.__corruptionfixQueryClient = queryClient;
