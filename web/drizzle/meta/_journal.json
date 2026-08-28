@@ -15,6 +15,13 @@
       "when": 1787784199897,
       "tag": "0001_office_stats_matview",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1787837695020,
+      "tag": "0002_perf_indexes",
+      "breakpoints": true
     }
   ]
 }

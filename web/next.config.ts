@@ -8,6 +8,11 @@ import type { NextConfig } from "next";
 //   renders tiles into canvas via blob workers and inline data URIs.
 // - `connect-src`/`img-src` allow `https://tiles.openfreemap.org`, the
 //   vector tile source used by the map.
+// - Place geocoding is deliberately NOT listed here: the browser calls our
+//   own /api/geocode, which proxies the upstream geocoder server-side. Keep
+//   it that way — a browser cannot set the descriptive `User-Agent` that
+//   Nominatim's usage policy requires, and the proxy is also where the
+//   rate limiting and caching live. See src/app/api/geocode/route.ts.
 // - `style-src 'unsafe-inline'` is required by maplibre-gl, which injects
 //   inline <style> for its canvas/marker CSS.
 const CSP = [

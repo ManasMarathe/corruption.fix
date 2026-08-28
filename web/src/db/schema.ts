@@ -96,7 +96,9 @@ export const offices = pgTable(
     name: text("name").notNull(),
     category: text("category").notNull(),
     // geometry(Point,4326); GiST index created via raw SQL in the migration
-    // (see drizzle/*.sql) rather than through the schema builder.
+    // (see drizzle/*.sql) rather than through the schema builder. A partial
+    // GiST index (WHERE source = 'user') and a pg_trgm GIN index on name
+    // also live in drizzle/0002_perf_indexes.sql.
     geom: geometryPoint("geom").notNull(),
     address: text("address"),
     districtId: uuid("district_id").references(() => districts.id),

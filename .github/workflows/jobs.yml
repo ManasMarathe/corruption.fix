@@ -2,8 +2,10 @@ name: Scheduled Jobs
 
 on:
   schedule:
-    # Every 30 minutes
-    - cron: "*/30 * * * *"
+    # Hourly, off the top-of-hour spike. Stats change slowly and the
+    # refresh-stats matview rebuild is the most expensive query the app
+    # runs — no reason to pay it every 30 minutes.
+    - cron: "23 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -23,7 +25,7 @@ jobs:
       - name: Refresh stats
         if: steps.check.outputs.skip == 'false'
         run: |
-          curl --fail --show-error --silent \
+          curl --fail --show-error --silent --max-time 330 \
             -X POST \
             -H "Authorization: Bearer ${{ secrets.JOB_SECRET }}" \
             "${{ vars.APP_URL }}/api/jobs/refresh-stats"
@@ -31,7 +33,7 @@ jobs:
       - name: Sign checkpoint
         if: steps.check.outputs.skip == 'false'
         run: |
-          curl --fail --show-error --silent \
+          curl --fail --show-error --silent --max-time 330 \
             -X POST \
             -H "Authorization: Bearer ${{ secrets.JOB_SECRET }}" \
             "${{ vars.APP_URL }}/api/jobs/sign-checkpoint"
@@ -39,7 +41,7 @@ jobs:
       - name: Evaluate thresholds
         if: steps.check.outputs.skip == 'false'
         run: |
-          curl --fail --show-error --silent \
+          curl --fail --show-error --silent --max-time 330 \
             -X POST \
             -H "Authorization: Bearer ${{ secrets.JOB_SECRET }}" \
             "${{ vars.APP_URL }}/api/jobs/evaluate-thresholds"

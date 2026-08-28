@@ -27,7 +27,12 @@ export async function GET(request: NextRequest) {
     if (!office) {
       return errorResponse(404, "not_found", strings.map.errors.notFound);
     }
-    return NextResponse.json({ office });
+    // The osm_uid → office mapping is effectively immutable (seeded from
+    // the OSM extract), so let Vercel's CDN serve repeat lookups.
+    return NextResponse.json(
+      { office },
+      { headers: { "Cache-Control": "public, s-maxage=3600, stale-while-revalidate=86400" } }
+    );
   } catch (error) {
     log.error({ err: error }, "office lookup failed");
     return errorResponse(500, "server_error", strings.map.errors.serverError);

@@ -93,6 +93,20 @@ console-mailer fallback is dev-only).
 
    `NODE_ENV` is set by Vercel automatically. `web/src/lib/env.ts` fails the
    boot loudly if a required production variable is missing.
+
+   The complaint chat assistant (`/api/chat`) uses the Vercel AI Gateway.
+   On Vercel it authenticates via OIDC automatically — no variable needed;
+   for local dev, set `AI_GATEWAY_API_KEY` in `web/.env.local` (create a
+   key under AI Gateway → API Keys in the Vercel dashboard).
+
+   The map's "where are you?" prompt geocodes place names through
+   `/api/geocode`, which defaults to the public OSM Nominatim instance and
+   needs no variable to work. Before real production traffic, set
+   `NOMINATIM_BASE_URL` to a self-hosted instance or a keyed provider
+   (MapTiler, LocationIQ) and `GEOCODER_USER_AGENT` to a string carrying a
+   real contact route — Nominatim's usage policy discourages
+   autocomplete-rate querying, and it blocks by IP, which Vercel functions
+   share across projects.
 4. Deploy. Subsequent pushes to `main` auto-deploy; PRs get preview URLs.
 
 ## 6. Scheduled jobs (GitHub repo settings)

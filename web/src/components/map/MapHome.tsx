@@ -14,8 +14,18 @@ import type {
 import type { DataDrivenPropertyValueSpecification } from "@maplibre/maplibre-gl-style-spec";
 import type { OfficeCategory } from "@/db/schema";
 import { CATEGORY_COLORS, CATEGORY_LIST, categoryColorExpression } from "@/lib/categories";
+import { INDIA_BOUNDS, type GeocodePlace } from "@/lib/geocode";
+import {
+  readSavedLocation,
+  savedLocationFromPlace,
+  skippedLocation,
+  writeSavedLocation,
+  type SavedLocation,
+} from "@/lib/saved-location";
 import { strings } from "@/lib/strings";
 import { CategoryFilterBar } from "./CategoryFilterBar";
+import { LocationChip } from "./LocationChip";
+import { LocationPrompt } from "./LocationPrompt";
 import { OfficeSearchBox, type OfficeSearchResult } from "./OfficeSearchBox";
 
 // Dynamically imported at runtime (see the init effect below) — maplibre-gl
@@ -34,12 +44,13 @@ const USER_LABEL_LAYER = "user-offices-label";
 const CLICKABLE_LAYERS = [OSM_CIRCLE_LAYER, USER_CIRCLE_LAYER];
 const FILTERABLE_LAYERS = [OSM_CIRCLE_LAYER, OSM_LABEL_LAYER, USER_CIRCLE_LAYER, USER_LABEL_LAYER];
 
-// [minLng, minLat, maxLng, maxLat] — matches the pmtiles archive's own
-// bounds (see pipeline/README.md), used for the initial map view.
-const INDIA_BOUNDS: [number, number, number, number] = [68.958232, 8.002868, 97.019637, 34.811197];
-
 const MOVE_DEBOUNCE_MS = 400;
 const USER_OFFICES_LIMIT = 500;
+
+// A Nominatim *node* result (a village, a single building) has a
+// near-degenerate bbox that would otherwise fit to street level. Belt-and-
+// braces with expandTinyBbox in src/lib/geocode.ts.
+const FIT_BOUNDS_OPTIONS = { padding: 24, maxZoom: 14 } as const;
 
 interface ApiOfficePoint {
   id: string;
@@ -62,6 +73,13 @@ export function MapHome() {
   const [activeCategories, setActiveCategories] = useState<Set<OfficeCategory>>(
     () => new Set(CATEGORY_LIST)
   );
+  // Deliberately NOT a lazy useState initializer reading localStorage: this
+  // component is server-rendered (app/page.tsx imports it directly, not via
+  // dynamic({ ssr: false })), so the server would render "no saved area" and
+  // the client "Pune", mismatching on the chip label. Populated in the
+  // effect below instead.
+  const [savedLocation, setSavedLocation] = useState<SavedLocation | null>(null);
+  const [promptOpen, setPromptOpen] = useState(false);
 
   // ---------------------------------------------------------------------
   // Map init (once).
@@ -71,6 +89,16 @@ export function MapHome() {
     let map: MapLibreMap | null = null;
 
     async function init() {
+      // Read before the dynamic imports: this runs client-side after mount,
+      // so localStorage is available and the saved bbox can go straight into
+      // the constructor. That's what avoids a flash of the India view (and a
+      // wasted fitBounds animation) on every return visit.
+      //
+      // Precedence is ?lat&lng > saved area > India. focusFromQueryParams
+      // would win visually anyway, but short-circuiting here avoids fitting
+      // to a bbox we're about to discard.
+      const saved = hasFocusQueryParams() ? null : readSavedLocation();
+
       const [maplibregl, { Protocol }] = await Promise.all([
         import("maplibre-gl"),
         import("pmtiles"),
@@ -84,8 +112,8 @@ export function MapHome() {
       map = new maplibregl.Map({
         container: containerRef.current,
         style: "https://tiles.openfreemap.org/styles/positron",
-        bounds: INDIA_BOUNDS,
-        fitBoundsOptions: { padding: 24 },
+        bounds: saved?.kind === "place" ? saved.bbox : INDIA_BOUNDS,
+        fitBoundsOptions: FIT_BOUNDS_OPTIONS,
       });
       mapRef.current = map;
 
@@ -205,6 +233,18 @@ export function MapHome() {
       mapRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time init
+  }, []);
+
+  // ---------------------------------------------------------------------
+  // Saved area (once, after mount). The init effect reads storage too; two
+  // reads is intentional and cheap — both run once and see the same data,
+  // and it keeps the constructor's bounds independent of React state.
+  // ---------------------------------------------------------------------
+  useEffect(() => {
+    const saved = readSavedLocation();
+    setSavedLocation(saved);
+    // Nothing stored and no deep link — this is a first visit, so ask.
+    if (!saved && !hasFocusQueryParams()) setPromptOpen(true);
   }, []);
 
   // ---------------------------------------------------------------------
@@ -356,17 +396,29 @@ export function MapHome() {
     });
   }
 
-  function focusFromQueryParams(map: MapLibreMap) {
+  /**
+   * Whether the URL is driving the initial view. Guards against absent
+   * params before Number(): Number(null) is 0, not NaN, so a bare "/" would
+   * otherwise jump to [0,0] at zoom 0 and open an empty popup over the Gulf
+   * of Guinea.
+   *
+   * Shared by focusFromQueryParams and the saved-area logic so "the URL
+   * wins" is stated once rather than emerging from two separate checks.
+   */
+  function hasFocusQueryParams(): boolean {
     const params = new URLSearchParams(window.location.search);
-    // Guard against absent params before Number(): Number(null) is 0, not
-    // NaN, so a bare "/" would otherwise jump to [0,0] at zoom 0 and open
-    // an empty popup over the Gulf of Guinea.
     const latRaw = params.get("lat");
     const lngRaw = params.get("lng");
-    if (latRaw === null || lngRaw === null) return;
-    const lat = Number(latRaw);
-    const lng = Number(lngRaw);
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+    if (latRaw === null || lngRaw === null) return false;
+    return Number.isFinite(Number(latRaw)) && Number.isFinite(Number(lngRaw));
+  }
+
+  function focusFromQueryParams(map: MapLibreMap) {
+    if (!hasFocusQueryParams()) return;
+
+    const params = new URLSearchParams(window.location.search);
+    const lat = Number(params.get("lat"));
+    const lng = Number(params.get("lng"));
 
     const zoomRaw = params.get("zoom");
     const zoomParam = zoomRaw === null ? NaN : Number(zoomRaw);
@@ -383,6 +435,27 @@ export function MapHome() {
     if (!map) return;
     map.flyTo({ center: [result.lng, result.lat], zoom: 16 });
     openPopup(map, [result.lng, result.lat], result.name, result.category, result.id);
+  }
+
+  function handleLocationSelect(place: GeocodePlace) {
+    const location = savedLocationFromPlace(place);
+    writeSavedLocation(location);
+    setSavedLocation(location);
+    setPromptOpen(false);
+    // fitBounds fires `moveend`, which the debounced handler above already
+    // turns into a refreshUserOffices call for the new viewport — no extra
+    // fetch wiring needed here.
+    mapRef.current?.fitBounds(place.bbox, { ...FIT_BOUNDS_OPTIONS, duration: 800 });
+  }
+
+  function handleLocationSkip() {
+    // Persisted rather than merely dismissed: "show all of India" is a
+    // choice, and re-asking on every visit would be a nag. The location chip
+    // is how they get back to the prompt.
+    const location = skippedLocation();
+    writeSavedLocation(location);
+    setSavedLocation(location);
+    setPromptOpen(false);
   }
 
   function toggleCategory(category: OfficeCategory) {
@@ -407,13 +480,19 @@ export function MapHome() {
       <div ref={containerRef} className="absolute inset-0 w-full h-full" />
 
       {!loaded ? (
-        <div className="absolute inset-0 flex items-center justify-center bg-white dark:bg-neutral-950 text-sm text-black/60 dark:text-white/60 z-30">
+        // z-[5]: below the chrome bar (z-10) so search/filter/add-office
+        // render and stay usable while the map is still loading.
+        <div className="absolute inset-0 flex items-center justify-center bg-white dark:bg-neutral-950 text-sm text-black/60 dark:text-white/60 z-[5]">
           {strings.map.loadingMap}
         </div>
       ) : null}
 
       <div className="absolute top-0 left-0 right-0 p-3 flex flex-col gap-2 z-10 pointer-events-none sm:flex-row sm:items-start sm:justify-between">
         <div className="pointer-events-auto flex flex-col gap-2 sm:flex-row sm:items-center">
+          <LocationChip
+            name={savedLocation?.kind === "place" ? savedLocation.name : null}
+            onClick={() => setPromptOpen(true)}
+          />
           <OfficeSearchBox onSelect={handleSearchSelect} />
           <CategoryFilterBar active={activeCategories} onToggle={toggleCategory} />
         </div>
@@ -424,6 +503,10 @@ export function MapHome() {
           {strings.map.addMissingOffice}
         </Link>
       </div>
+
+      {promptOpen ? (
+        <LocationPrompt onSelect={handleLocationSelect} onSkip={handleLocationSkip} />
+      ) : null}
     </div>
   );
 }

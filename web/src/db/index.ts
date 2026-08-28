@@ -13,7 +13,11 @@ const globalForDb = globalThis as unknown as {
 const queryClient =
   globalForDb.__corruptionfixQueryClient ??
   postgres(env.DATABASE_URL, {
-    max: env.NODE_ENV === "production" ? 10 : 5,
+    // On Vercel each route is its own function and each instance serves
+    // roughly one request at a time, so a big per-process pool just holds
+    // Supavisor client slots hostage across N concurrent instances and
+    // requests end up queueing on connection acquisition. Keep it small.
+    max: env.NODE_ENV === "production" ? 2 : 5,
     // Supabase's connection pooler (Supavisor, transaction mode — the URL
     // Vercel should use) multiplexes many clients over few server
     // connections and therefore can't support session-scoped prepared

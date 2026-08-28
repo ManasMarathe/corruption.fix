@@ -4,6 +4,10 @@ import { checkJobAuth, isJobName, runJob } from "@/lib/jobs";
 import { log } from "@/lib/log";
 
 export const dynamic = "force-dynamic";
+// refresh-stats rebuilds the office_stats matview (~one row per office);
+// the default function timeout kills it mid-refresh while the DB keeps
+// chewing on the query.
+export const maxDuration = 300;
 
 /**
  * Dispatcher for the scheduled maintenance jobs (see src/lib/jobs.ts and

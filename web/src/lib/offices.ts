@@ -1,3 +1,4 @@
+import { cache } from "react";
 import { and, desc, eq, ilike, sql } from "drizzle-orm";
 import { db } from "@/db";
 import {
@@ -119,7 +120,11 @@ export async function insertUserOffice(
   };
 }
 
-export async function getOfficeById(
+// The office-page readers below are wrapped in React cache() so a single
+// request that needs the same row twice (generateMetadata + the page
+// component both call getOfficeById) issues one query. Next only dedupes
+// fetch(), not driver calls.
+export const getOfficeById = cache(async function getOfficeById(
   id: string
 ): Promise<(OfficePoint & { status: string; source: string }) | null> {
   const rows = await db
@@ -132,7 +137,7 @@ export async function getOfficeById(
     .where(eq(offices.id, id))
     .limit(1);
   return (rows[0] as (OfficePoint & { status: string; source: string }) | undefined) ?? null;
-}
+});
 
 export interface OfficeStats {
   officeId: string;
@@ -158,7 +163,9 @@ type OfficeStatsRow = {
  * drizzle/0001_office_stats_matview.sql). Never aggregate `complaints`
  * per-request.
  */
-export async function getOfficeStats(id: string): Promise<OfficeStats | null> {
+export const getOfficeStats = cache(async function getOfficeStats(
+  id: string
+): Promise<OfficeStats | null> {
   const rows = await db.execute<OfficeStatsRow>(sql`
     SELECT office_id, complaint_count, published_count, top_service, median_bribe, last_month
     FROM office_stats
@@ -174,7 +181,7 @@ export async function getOfficeStats(id: string): Promise<OfficeStats | null> {
     medianBribe: row.median_bribe === null ? null : Number(row.median_bribe),
     lastMonth: row.last_month,
   };
-}
+});
 
 export interface PublishedOfficer {
   id: string;
@@ -189,7 +196,7 @@ export interface PublishedOfficer {
  * `officer_name_private` against `officers.name_normalized`, which is
  * exactly the kind of coupling the private/public split exists to avoid.
  */
-export async function getPublishedOfficers(
+export const getPublishedOfficers = cache(async function getPublishedOfficers(
   officeId: string
 ): Promise<PublishedOfficer[]> {
   const rows = await db
@@ -202,7 +209,7 @@ export async function getPublishedOfficers(
     .from(officers)
     .where(and(eq(officers.officeId, officeId), eq(officers.status, "published")));
   return rows;
-}
+});
 
 export interface PublishedComplaint {
   id: string;
@@ -217,7 +224,7 @@ export interface PublishedComplaint {
  * that are safe to show publicly — never `reporter_id`, exact
  * `created_at`, or `officer_name_private`.
  */
-export async function getPublishedComplaints(
+export const getPublishedComplaints = cache(async function getPublishedComplaints(
   officeId: string
 ): Promise<PublishedComplaint[]> {
   const rows = await db
@@ -232,7 +239,7 @@ export async function getPublishedComplaints(
     .where(and(eq(complaints.officeId, officeId), eq(complaints.status, "published")))
     .orderBy(desc(complaints.publicMonth));
   return rows;
-}
+});
 
 /** Today's date at UTC midnight, as a plain calendar day for `office_view_counts.day`. */
 function todayUtc(): Date {

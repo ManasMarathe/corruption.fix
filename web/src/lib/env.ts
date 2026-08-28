@@ -39,7 +39,25 @@ const rawEnvSchema = z.object({
   // Resend — see src/lib/mailer.ts.
   RESEND_API_KEY: z.string().min(1).optional(),
   EMAIL_FROM: z.string().min(1).optional(),
+  // Vercel AI Gateway key for the complaint chat assistant. Only needed for
+  // local dev — on Vercel the gateway authenticates via OIDC automatically.
+  // The AI SDK's gateway provider reads process.env.AI_GATEWAY_API_KEY
+  // itself; this entry exists for validation/documentation.
+  AI_GATEWAY_API_KEY: z.string().min(1).optional(),
+  // Place geocoding for the map's "where are you?" prompt. Neither is a
+  // secret, and both have working defaults — the public Nominatim instance
+  // is fine for development and low traffic. Point NOMINATIM_BASE_URL at a
+  // self-hosted instance or a keyed provider before real production volume:
+  // Nominatim's usage policy discourages autocomplete-rate querying, and it
+  // blocks by IP, which serverless functions share.
+  NOMINATIM_BASE_URL: z.string().url().optional(),
+  // Nominatim's policy requires a descriptive User-Agent with a contact
+  // route. Substitute the real production URL or a contact email.
+  GEOCODER_USER_AGENT: z.string().min(1).optional(),
 });
+
+const DEFAULT_NOMINATIM_BASE_URL = "https://nominatim.openstreetmap.org";
+const DEFAULT_GEOCODER_USER_AGENT = "CorruptionFix/1.0 (+https://corruptionfix.org)";
 
 // Fixed, obviously-fake fallbacks used only outside production. Never used
 // as real secrets — production always requires the real value. Must be
@@ -113,6 +131,9 @@ function loadEnv() {
     SESSION_SECRET: data.SESSION_SECRET,
     RESEND_API_KEY: data.RESEND_API_KEY,
     EMAIL_FROM: data.EMAIL_FROM,
+    AI_GATEWAY_API_KEY: data.AI_GATEWAY_API_KEY,
+    NOMINATIM_BASE_URL: data.NOMINATIM_BASE_URL ?? DEFAULT_NOMINATIM_BASE_URL,
+    GEOCODER_USER_AGENT: data.GEOCODER_USER_AGENT ?? DEFAULT_GEOCODER_USER_AGENT,
   };
 }
 

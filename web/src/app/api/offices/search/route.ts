@@ -21,7 +21,13 @@ export async function GET(request: NextRequest) {
 
   try {
     const results = await searchOffices(parsed.data, RESULT_LIMIT);
-    return NextResponse.json({ results });
+    // Office names are near-static OSM data; a short CDN TTL lets popular
+    // query strings skip the DB. Kept modest so user-added offices show
+    // up in search within minutes.
+    return NextResponse.json(
+      { results },
+      { headers: { "Cache-Control": "public, s-maxage=300, stale-while-revalidate=3600" } }
+    );
   } catch (error) {
     log.error({ err: error }, "office search failed");
     return errorResponse(500, "server_error", strings.map.errors.serverError);
