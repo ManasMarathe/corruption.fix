@@ -12,8 +12,9 @@ const ChatPanel = dynamic(() => import("./ChatPanel").then((m) => m.ChatPanel), 
 
 /**
  * Floating launcher for the complaint chat assistant, mounted next to
- * MapHome on the home page. bottom-10 keeps it clear of maplibre's
- * attribution control in the bottom-right corner.
+ * MapHome on the home page. Anchors the bottom-right corner; globals.css
+ * lifts maplibre's control stack (`.maplibregl-ctrl-bottom-right`) above
+ * it so the two don't overlap.
  */
 export function ChatWidget() {
   const [open, setOpen] = useState(false);
@@ -29,8 +30,20 @@ export function ChatWidget() {
             setOpen(true);
             setEverOpened(true);
           }}
-          className="fixed right-3 bottom-10 z-20 rounded-full bg-black text-white dark:bg-white dark:text-black px-4 py-3 text-sm font-medium shadow-sm hover:opacity-90"
+          className="fixed right-4 bottom-4 z-20 inline-flex items-center gap-2 rounded-full bg-black text-white dark:bg-white dark:text-black px-5 py-3.5 text-base font-semibold shadow-lg hover:opacity-90"
         >
+          <svg
+            aria-hidden="true"
+            className="w-5 h-5"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={2}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+          </svg>
           {strings.chat.launcherLabel}
         </button>
       )}

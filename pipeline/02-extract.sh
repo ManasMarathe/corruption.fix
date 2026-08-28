@@ -16,7 +16,12 @@ OUT="data/india-offices.geojsonseq"
 [ -f "$IN" ] || { echo "$IN missing — run 01-download.sh first" >&2; exit 1; }
 
 echo "== osmium tags-filter =="
-echo "  amenity=police, amenity=post_office, amenity=courthouse, office=government"
+# amenity=townhall (799 features in the India extract) and
+# office=administrative (100) are municipal/administrative government
+# buildings — nagar palika/panchayat offices etc — that were previously
+# falling through the filter entirely. See lib/office-tags.mjs categoryFor()
+# for how they're categorized.
+echo "  amenity=police, amenity=post_office, amenity=courthouse, amenity=townhall, office=government, office=administrative"
 osmium tags-filter \
   --overwrite \
   -o "$FILTERED" \
@@ -24,7 +29,9 @@ osmium tags-filter \
   nwr/amenity=police \
   nwr/amenity=post_office \
   nwr/amenity=courthouse \
-  nwr/office=government
+  nwr/amenity=townhall \
+  nwr/office=government \
+  nwr/office=administrative
 echo "  done: $(ls -la "$FILTERED")"
 
 echo

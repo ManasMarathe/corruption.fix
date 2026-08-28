@@ -83,11 +83,35 @@ export const OFFICE_CATEGORIES = [
 ] as const;
 export type OfficeCategory = (typeof OFFICE_CATEGORIES)[number];
 
-export const OFFICE_SOURCES = ["osm", "user"] as const;
+// "osm" and "user" are the original two. The rest are authoritative
+// government datasets imported by pipeline/05-sources/* — OSM covers only a
+// small fraction of India's offices (~3% of post offices), so bulk imports
+// are the only way the map reflects reality. See pipeline/README.md.
+export const OFFICE_SOURCES = [
+  "osm",
+  "user",
+  "indiapost",
+  "uidai",
+  "parivahan",
+  "ecourts",
+  "police",
+] as const;
 export type OfficeSource = (typeof OFFICE_SOURCES)[number];
 
 export const OFFICE_STATUSES = ["seeded", "user_added", "verified"] as const;
 export type OfficeStatus = (typeof OFFICE_STATUSES)[number];
+
+/**
+ * How much to trust an office's coordinates.
+ *
+ * "exact" — from OSM, or a pin a human placed.
+ * "approximate" — derived from a pincode centroid because the upstream
+ *   dataset carries no coordinates. The India Post directory (~155k offices)
+ *   is entirely in this category, so these are drawn differently and hidden
+ *   by default; the /add-office pin flow is how they get corrected.
+ */
+export const LOCATION_PRECISIONS = ["exact", "approximate"] as const;
+export type LocationPrecision = (typeof LOCATION_PRECISIONS)[number];
 
 export const offices = pgTable(
   "offices",
@@ -104,6 +128,11 @@ export const offices = pgTable(
     districtId: uuid("district_id").references(() => districts.id),
     source: text("source").notNull(),
     osmId: bigint("osm_id", { mode: "number" }).unique(),
+    // Stable upstream identity within `source`, e.g. "400004:Ambewadi" for
+    // India Post. The (source, source_ref) unique index is what makes
+    // re-running an import idempotent instead of duplicating every office.
+    sourceRef: text("source_ref"),
+    locationPrecision: text("location_precision").notNull().default("exact"),
     status: text("status").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
       .notNull()
@@ -112,17 +141,72 @@ export const offices = pgTable(
   (table) => [
     index("offices_district_id_idx").on(table.districtId),
     index("offices_category_idx").on(table.category),
+    // Partial: every pre-existing OSM row has a NULL source_ref, and only
+    // imported rows carry one. Postgres treats NULLs as distinct in a unique
+    // index anyway, but saying so explicitly keeps the intent legible and
+    // survives anyone reaching for NULLS NOT DISTINCT later.
+    uniqueIndex("offices_source_ref_key")
+      .on(table.source, table.sourceRef)
+      .where(sql`${table.sourceRef} is not null`),
     check(
       "offices_category_check",
       sql`${table.category} in ('police','post_office','court','govt_office','rto','other')`
     ),
     check(
       "offices_source_check",
-      sql`${table.source} in ('osm','user')`
+      sql`${table.source} in ('osm','user','indiapost','uidai','parivahan','ecourts','police')`
+    ),
+    check(
+      "offices_location_precision_check",
+      sql`${table.locationPrecision} in ('exact','approximate')`
     ),
     check(
       "offices_status_check",
       sql`${table.status} in ('seeded','user_added','verified')`
+    ),
+  ]
+);
+
+/**
+ * What a given office actually does for the public.
+ *
+ * Distinct from `offices.category`, which is what *kind* of office it is. A
+ * post office that runs an Aadhaar counter is `category: "post_office"` with
+ * the `aadhaar` service — "the post office with Aadhaar" is not expressible
+ * with the category enum alone, which is why this table exists.
+ *
+ * Also distinct from `complaints.serviceType`, which is free text describing
+ * what the *reporter* was trying to do.
+ */
+export const OFFICE_SERVICES = [
+  "aadhaar",
+  "passport_seva",
+  "pension",
+  "banking",
+  "vehicle_registration",
+  "driving_licence",
+  "fir",
+  "land_records",
+  "birth_death_certificate",
+] as const;
+export type OfficeService = (typeof OFFICE_SERVICES)[number];
+
+export const officeServices = pgTable(
+  "office_services",
+  {
+    officeId: uuid("office_id")
+      .notNull()
+      .references(() => offices.id, { onDelete: "cascade" }),
+    service: text("service").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.officeId, table.service] }),
+    // Drives the "offices offering X" filter, which reads by service and
+    // collects office ids — the reverse of the primary key's ordering.
+    index("office_services_service_idx").on(table.service),
+    check(
+      "office_services_service_check",
+      sql`${table.service} in ('aadhaar','passport_seva','pension','banking','vehicle_registration','driving_licence','fir','land_records','birth_death_certificate')`
     ),
   ]
 );

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AddOfficeMap } from "@/components/map/AddOfficeMap";
 import { CATEGORY_LIST } from "@/lib/categories";
 import { strings } from "@/lib/strings";
@@ -14,6 +14,69 @@ interface ErrorBody {
 async function readErrorMessage(res: Response, fallback: string): Promise<string> {
   const body = (await res.json().catch(() => null)) as ErrorBody | null;
   return body?.error?.message ?? fallback;
+}
+
+// ~180k offices are about to land via bulk import, so the client-side check
+// below is a soft, best-effort nudge, not the source of truth — the server
+// (POST /api/offices) makes its own, stricter same-category+near-name check.
+const DUPLICATE_RADIUS_M = 100;
+
+interface NearbyOffice {
+  id: string;
+  name: string;
+  category: OfficeCategory;
+  lat: number;
+  lng: number;
+}
+
+/** Great-circle distance in meters. Good enough at this scale (~100m checks). */
+function haversineMeters(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const EARTH_RADIUS_M = 6_371_000;
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 2 * EARTH_RADIUS_M * Math.asin(Math.sqrt(a));
+}
+
+/** A small bbox around (lat, lng), wide enough to contain everything within `meters`. */
+function bboxAround(lat: number, lng: number, meters: number): string {
+  const latDelta = meters / 111_320;
+  const lngDelta = meters / (111_320 * Math.cos((lat * Math.PI) / 180));
+  return [lng - lngDelta, lat - latDelta, lng + lngDelta, lat + latDelta].join(",");
+}
+
+/**
+ * Best-effort same-category-nearby check for the client-side warning.
+ *
+ * Reuses GET /api/offices?bbox=, which only returns `source = 'user'`
+ * offices (see the comment on that route) — so this cannot see the OSM or
+ * bulk-imported (indiapost/uidai/parivahan/ecourts/police) offices that make
+ * up the vast majority of the map. That's a known gap: it catches duplicate
+ * *user* submissions, not duplicates of imported data. Any failure here is
+ * swallowed — a broken check should never block a legitimate submission.
+ */
+async function findNearbyDuplicate(
+  lat: number,
+  lng: number,
+  category: OfficeCategory
+): Promise<string | null> {
+  try {
+    const bbox = bboxAround(lat, lng, DUPLICATE_RADIUS_M);
+    const res = await fetch(`/api/offices?bbox=${encodeURIComponent(bbox)}`);
+    if (!res.ok) return null;
+    const body: { offices: NearbyOffice[] } = await res.json();
+    const match = body.offices.find(
+      (o) =>
+        o.category === category &&
+        haversineMeters(lat, lng, o.lat, o.lng) <= DUPLICATE_RADIUS_M
+    );
+    return match?.name ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function AuthGate({ onAuthenticated }: { onAuthenticated: () => void }) {
@@ -132,6 +195,36 @@ function AddOfficeForm() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [created, setCreated] = useState<{ id: string; name: string } | null>(null);
+  // Name of a likely-duplicate office found near the pin, or null if none
+  // has been flagged (yet). Cleared whenever the pin or category changes, so
+  // a stale warning never survives the user fixing the thing it was about.
+  const [duplicateName, setDuplicateName] = useState<string | null>(null);
+  const [duplicateConfirmed, setDuplicateConfirmed] = useState(false);
+
+  useEffect(() => {
+    setDuplicateName(null);
+    setDuplicateConfirmed(false);
+  }, [position, category]);
+
+  async function postOffice() {
+    const res = await fetch("/api/offices", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: name.trim(),
+        category,
+        lat: position!.lat,
+        lng: position!.lng,
+        address: address.trim() || undefined,
+      }),
+    });
+    if (!res.ok) {
+      setError(await readErrorMessage(res, strings.addOffice.errors.serverError));
+      return;
+    }
+    const body: { office: { id: string; name: string } } = await res.json();
+    setCreated(body.office);
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -148,23 +241,31 @@ function AddOfficeForm() {
 
     setBusy(true);
     try {
-      const res = await fetch("/api/offices", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: name.trim(),
-          category,
-          lat: position.lat,
-          lng: position.lng,
-          address: address.trim() || undefined,
-        }),
-      });
-      if (!res.ok) {
-        setError(await readErrorMessage(res, strings.addOffice.errors.serverError));
-        return;
+      if (!duplicateConfirmed) {
+        const match = await findNearbyDuplicate(position.lat, position.lng, category);
+        if (match) {
+          // Surface the warning and stop short of submitting — the explicit
+          // "Add it anyway" button (not this form submit) is what proceeds,
+          // so a genuinely distinct nearby office never gets silently blocked.
+          setDuplicateName(match);
+          return;
+        }
       }
-      const body: { office: { id: string; name: string } } = await res.json();
-      setCreated(body.office);
+      await postOffice();
+    } catch {
+      setError(strings.addOffice.errors.serverError);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirmDuplicateAndSubmit() {
+    if (!position) return;
+    setError(null);
+    setDuplicateConfirmed(true);
+    setBusy(true);
+    try {
+      await postOffice();
     } catch {
       setError(strings.addOffice.errors.serverError);
     } finally {
@@ -243,6 +344,9 @@ function AddOfficeForm() {
 
       <div className="flex flex-col gap-1 text-sm">
         <span>{strings.addOffice.pinInstructions}</span>
+        <span className="text-xs text-black/50 dark:text-white/50">
+          {strings.addOffice.existingNearby}
+        </span>
         <AddOfficeMap onChange={(lat, lng) => setPosition({ lat, lng })} />
         {position ? (
           <span className="text-xs text-black/50 dark:text-white/50">
@@ -250,6 +354,20 @@ function AddOfficeForm() {
           </span>
         ) : null}
       </div>
+
+      {duplicateName ? (
+        <div className="flex flex-col gap-2 rounded-md border border-amber-400/60 bg-amber-50 dark:bg-amber-950/30 p-3 text-sm text-amber-900 dark:text-amber-200">
+          <p>{strings.addOffice.duplicateWarning(duplicateName)}</p>
+          <button
+            type="button"
+            onClick={confirmDuplicateAndSubmit}
+            disabled={busy}
+            className="rounded-md border border-amber-600/40 px-3 py-1.5 text-xs font-medium hover:bg-amber-100 dark:hover:bg-amber-900/40 disabled:opacity-50 w-fit"
+          >
+            {strings.addOffice.duplicateContinue}
+          </button>
+        </div>
+      ) : null}
 
       {error ? <p className="text-sm text-red-600 dark:text-red-400">{error}</p> : null}
 

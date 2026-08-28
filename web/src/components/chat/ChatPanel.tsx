@@ -15,6 +15,7 @@ type DraftToolOutput =
 /** Conversation surface: transcript, tool status lines, draft card, input. */
 export function ChatPanel() {
   const [input, setInput] = useState("");
+  const [disclosureExpanded, setDisclosureExpanded] = useState(false);
   const { messages, sendMessage, status, error, regenerate } = useChat();
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -49,15 +50,41 @@ export function ChatPanel() {
 
   return (
     <div className="flex flex-col flex-1 min-h-0">
-      <p className="px-4 py-2 text-xs text-black/50 dark:text-white/50 border-b border-black/10 dark:border-white/10">
-        {strings.chat.disclosure}
-      </p>
+      <div className="px-4 py-2 text-xs text-black/50 dark:text-white/50 border-b border-black/10 dark:border-white/10">
+        <div className="flex items-center justify-between gap-2">
+          <span>{strings.chat.disclosureShort}</span>
+          <button
+            type="button"
+            aria-expanded={disclosureExpanded}
+            onClick={() => setDisclosureExpanded((v) => !v)}
+            className="shrink-0 underline hover:opacity-70"
+          >
+            {disclosureExpanded ? strings.chat.disclosureHide : strings.chat.disclosureShow}
+          </button>
+        </div>
+        {disclosureExpanded && <p className="mt-1">{strings.chat.disclosure}</p>}
+      </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 flex flex-col gap-3">
         {messages.length === 0 && (
-          <p className="text-sm text-black/60 dark:text-white/60">
-            {strings.chat.emptyState}
-          </p>
+          <div className="flex flex-col gap-3">
+            <p className="text-sm text-black/60 dark:text-white/60">
+              {strings.chat.emptyState}
+            </p>
+            <div className="flex flex-col items-start gap-2">
+              {strings.chat.starters.map((starter) => (
+                <button
+                  key={starter}
+                  type="button"
+                  disabled={busy}
+                  onClick={() => sendMessage({ text: starter })}
+                  className="text-left rounded-full border border-black/10 dark:border-white/20 px-3 py-1.5 text-xs font-medium hover:bg-black/5 dark:hover:bg-white/10 disabled:opacity-50"
+                >
+                  {starter}
+                </button>
+              ))}
+            </div>
+          </div>
         )}
 
         {messages.map((message) => (

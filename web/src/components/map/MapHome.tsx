@@ -6,6 +6,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import type {
   CircleLayerSpecification,
   GeoJSONSource,
+  IControl,
   Map as MapLibreMap,
   MapLayerMouseEvent,
   Popup as MapLibrePopup,
@@ -13,8 +14,8 @@ import type {
 } from "maplibre-gl";
 import type { DataDrivenPropertyValueSpecification } from "@maplibre/maplibre-gl-style-spec";
 import type { OfficeCategory } from "@/db/schema";
-import { CATEGORY_COLORS, CATEGORY_LIST, categoryColorExpression } from "@/lib/categories";
-import { INDIA_BOUNDS, type GeocodePlace } from "@/lib/geocode";
+import { CATEGORY_COLORS, categoryColorExpression } from "@/lib/categories";
+import { INDIA_BOUNDS, type BBox, type GeocodePlace } from "@/lib/geocode";
 import {
   readSavedLocation,
   savedLocationFromPlace,
@@ -23,7 +24,7 @@ import {
   type SavedLocation,
 } from "@/lib/saved-location";
 import { strings } from "@/lib/strings";
-import { CategoryFilterBar } from "./CategoryFilterBar";
+import { defaultMapFilters, MapFilterPanel, type MapFilters } from "./MapFilterPanel";
 import { LocationChip } from "./LocationChip";
 import { LocationPrompt } from "./LocationPrompt";
 import { OfficeSearchBox, type OfficeSearchResult } from "./OfficeSearchBox";
@@ -44,6 +45,10 @@ const USER_LABEL_LAYER = "user-offices-label";
 const CLICKABLE_LAYERS = [OSM_CIRCLE_LAYER, USER_CIRCLE_LAYER];
 const FILTERABLE_LAYERS = [OSM_CIRCLE_LAYER, OSM_LABEL_LAYER, USER_CIRCLE_LAYER, USER_LABEL_LAYER];
 
+// Zoom below which no office renders at all. ~180k pins at country zoom is
+// an unreadable blur, so the map stays clean and tells the user to zoom in.
+const OFFICE_MIN_ZOOM = 8;
+
 const MOVE_DEBOUNCE_MS = 400;
 const USER_OFFICES_LIMIT = 500;
 
@@ -51,6 +56,129 @@ const USER_OFFICES_LIMIT = 500;
 // near-degenerate bbox that would otherwise fit to street level. Belt-and-
 // braces with expandTinyBbox in src/lib/geocode.ts.
 const FIT_BOUNDS_OPTIONS = { padding: 24, maxZoom: 14 } as const;
+
+/**
+ * "Back to my area" control, matching maplibre's own control markup
+ * (`.maplibregl-ctrl.maplibregl-ctrl-group`) so it's visually part of the
+ * bottom-right stack rather than a bolted-on button.
+ *
+ * It reads the target bbox from a ref rather than being handed one at
+ * construction time: the control is added once, but the saved area can
+ * change afterwards (LocationPrompt), and a ref lets the same control
+ * instance pick up the new bbox without the map needing to be rebuilt or
+ * the control re-added.
+ */
+class BackToAreaControl implements IControl {
+  private readonly bboxRef: { current: BBox | null };
+
+  constructor(bboxRef: { current: BBox | null }) {
+    this.bboxRef = bboxRef;
+  }
+
+  onAdd(map: MapLibreMap): HTMLElement {
+    const container = document.createElement("div");
+    container.className = "maplibregl-ctrl maplibregl-ctrl-group";
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.title = strings.map.controls.backToArea;
+    button.setAttribute("aria-label", strings.map.controls.backToArea);
+    button.textContent = "⌂"; // house glyph — simple, no icon font/SVG needed
+    button.addEventListener("click", () => {
+      const bbox = this.bboxRef.current;
+      if (bbox) map.fitBounds(bbox, FIT_BOUNDS_OPTIONS);
+    });
+
+    container.appendChild(button);
+    return container;
+  }
+
+  onRemove(): void {
+    // Nothing to tear down beyond the DOM node maplibre itself removes —
+    // no listeners were attached outside `container`.
+  }
+}
+
+/**
+ * Composes every filter dimension (category, service, "has reports",
+ * approximate-location inclusion) into one `["all", ...]` expression, plus
+ * two zoom-based declutter rules, applied to every layer in
+ * FILTERABLE_LAYERS.
+ *
+ * The declutter rules use `["step", ["zoom"], ...]` rather than a static
+ * per-layer `minzoom` or splitting each layer per category: the pmtiles
+ * import takes this map from ~25k to ~180k offices, dominated by post
+ * offices, so post offices alone need a higher zoom floor than every other
+ * category — and approximate (pincode-centroid) points need a *further*,
+ * independent floor on top of that. A `step` expression folds both rules
+ * into the one filter each layer already has, instead of forking every
+ * layer (and CLICKABLE_LAYERS' hover/click bindings) into per-category and
+ * per-precision copies.
+ */
+function buildFilterExpression(filters: MapFilters): unknown[] {
+  const parts: unknown[] = [
+    ["in", ["get", "category"], ["literal", Array.from(filters.categories)]],
+  ];
+
+  if (filters.services.size > 0) {
+    // Tile features carry `services` as a comma-joined string (owned by the
+    // tile build, not this component). Pad with a leading/trailing comma
+    // and search for `,service,` rather than a bare substring match, so
+    // e.g. filtering on "fir" can't accidentally match inside some other
+    // service token. `coalesce` defensively treats a feature with no
+    // `services` property as having none, rather than erroring.
+    const paddedServices = [
+      "concat",
+      ",",
+      ["to-string", ["coalesce", ["get", "services"], ""]],
+      ",",
+    ];
+    parts.push([
+      "any",
+      ...Array.from(filters.services).map((service) => [
+        ">=",
+        ["index-of", `,${service},`, paddedServices],
+        0,
+      ]),
+    ]);
+  }
+
+  if (filters.withReportsOnly) {
+    // Defensive: a feature with no `has_reports` property coalesces to
+    // false and is excluded, rather than erroring.
+    parts.push(["==", ["coalesce", ["get", "has_reports"], false], true]);
+  }
+
+  // Features with no `precision` property are exact locations and must
+  // pass either way — coalesce to "exact" so an absent property never
+  // matches "approximate".
+  const isApproximate = ["==", ["coalesce", ["get", "precision"], "exact"], "approximate"];
+
+  if (!filters.includeApproximate) {
+    parts.push(["!", isApproximate]);
+  }
+
+  // Category declutter: nothing below OFFICE_MIN_ZOOM; from there everything
+  // except post offices; from z11 post offices join in too. The floor leaves
+  // the default all-India view empty by design, so MapHome pairs it with a
+  // "zoom in to see offices" hint — see `belowOfficeZoom`.
+  parts.push([
+    "step",
+    ["zoom"],
+    false,
+    OFFICE_MIN_ZOOM,
+    ["!=", ["get", "category"], "post_office"],
+    11,
+    true,
+  ]);
+
+  // Approximate-location declutter: those points only render from z13,
+  // regardless of the category rule above — exact-location points are
+  // untouched by this rule (it only ever narrows approximate ones further).
+  parts.push(["step", ["zoom"], ["!", isApproximate], 13, true]);
+
+  return ["all", ...parts];
+}
 
 interface ApiOfficePoint {
   id: string;
@@ -68,11 +196,19 @@ export function MapHome() {
   const popupRef = useRef<MapLibrePopup | null>(null);
   const popupTokenRef = useRef(0);
   const moveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Read by BackToAreaControl's click handler; kept current by the "back to
+  // area" effect below rather than by rebuilding the control on every
+  // savedLocation change.
+  const backToAreaBboxRef = useRef<BBox | null>(null);
+  const backToAreaControlRef = useRef<BackToAreaControl | null>(null);
 
   const [loaded, setLoaded] = useState(false);
-  const [activeCategories, setActiveCategories] = useState<Set<OfficeCategory>>(
-    () => new Set(CATEGORY_LIST)
-  );
+  const [filters, setFilters] = useState<MapFilters>(defaultMapFilters);
+  // Drives the "zoom in to see offices" hint. buildFilterExpression hides
+  // every office below OFFICE_MIN_ZOOM, and the default all-India view sits
+  // well below it — without the hint that reads as a broken map rather than
+  // a deliberate declutter.
+  const [belowOfficeZoom, setBelowOfficeZoom] = useState(false);
   // Deliberately NOT a lazy useState initializer reading localStorage: this
   // component is server-rendered (app/page.tsx imports it directly, not via
   // dynamic({ ssr: false })), so the server would render "no saved area" and
@@ -109,15 +245,39 @@ export function MapHome() {
       maplibregl.addProtocol("pmtiles", protocol.tile);
       maplibreRef.current = maplibregl;
 
+      // attributionControl: false + adding AttributionControl explicitly
+      // below is what lets it move to bottom-left, freeing bottom-right for
+      // the geolocate/fullscreen/navigation/back-to-area stack.
       map = new maplibregl.Map({
         container: containerRef.current,
         style: "https://tiles.openfreemap.org/styles/positron",
         bounds: saved?.kind === "place" ? saved.bbox : INDIA_BOUNDS,
         fitBoundsOptions: FIT_BOUNDS_OPTIONS,
+        attributionControl: false,
       });
       mapRef.current = map;
+      backToAreaBboxRef.current = saved?.kind === "place" ? saved.bbox : null;
 
-      map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+      // Bottom-right, in stacking order (maplibre stacks top-to-bottom in
+      // the order controls are added): fullscreen, geolocate, navigation
+      // (compass now enabled so a rotated map can be reset to north), then
+      // "back to my area" — added separately below once there's somewhere
+      // to go back to.
+      map.addControl(new maplibregl.FullscreenControl(), "bottom-right");
+      map.addControl(
+        new maplibregl.GeolocateControl({
+          positionOptions: { enableHighAccuracy: true },
+          trackUserLocation: true,
+          showUserLocation: true,
+        }),
+        "bottom-right"
+      );
+      map.addControl(new maplibregl.NavigationControl({ showCompass: true }), "bottom-right");
+
+      // Bottom-left: scale, then the attribution control freed up by
+      // `attributionControl: false` above.
+      map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-left");
+      map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-left");
 
       map.on("load", () => {
         if (cancelled || !map) return;
@@ -133,6 +293,41 @@ export function MapHome() {
 
         const circleColor = categoryColorExpression() as DataDrivenPropertyValueSpecification<string>;
 
+        // Approximate (pincode-centroid) offices render as a hollow ring —
+        // opacity 0 fill, visible stroke in the category color instead of
+        // the usual white — rather than a filled dot, so "we don't know
+        // exactly where this is" is legible rather than implied precision
+        // we don't have. `coalesce` means a feature with no `precision`
+        // property (the common case) is simply treated as exact.
+        const isApproximate = ["==", ["coalesce", ["get", "precision"], "exact"], "approximate"];
+        const circleOpacity = [
+          "case",
+          isApproximate,
+          0,
+          1,
+        ] as unknown as DataDrivenPropertyValueSpecification<number>;
+        const circleStrokeWidth = [
+          "case",
+          isApproximate,
+          2,
+          1,
+        ] as unknown as DataDrivenPropertyValueSpecification<number>;
+        const circleStrokeColor = [
+          "case",
+          isApproximate,
+          circleColor,
+          "#ffffff",
+        ] as unknown as DataDrivenPropertyValueSpecification<string>;
+        // User-added offices keep their own (darker) default stroke color
+        // when not approximate — their width was already 2 either way, so
+        // only the color needs a `case`.
+        const userCircleStrokeColor = [
+          "case",
+          isApproximate,
+          circleColor,
+          "#111827",
+        ] as unknown as DataDrivenPropertyValueSpecification<string>;
+
         const officeCircleLayer: CircleLayerSpecification = {
           id: OSM_CIRCLE_LAYER,
           type: "circle",
@@ -141,8 +336,9 @@ export function MapHome() {
           paint: {
             "circle-radius": ["interpolate", ["linear"], ["zoom"], 4, 2, 10, 4, 16, 8],
             "circle-color": circleColor,
-            "circle-stroke-width": 1,
-            "circle-stroke-color": "#ffffff",
+            "circle-opacity": circleOpacity,
+            "circle-stroke-width": circleStrokeWidth,
+            "circle-stroke-color": circleStrokeColor,
           },
         };
         map.addLayer(officeCircleLayer);
@@ -175,8 +371,12 @@ export function MapHome() {
           paint: {
             "circle-radius": ["interpolate", ["linear"], ["zoom"], 4, 3, 10, 5, 16, 9],
             "circle-color": circleColor,
+            "circle-opacity": circleOpacity,
+            // User-added offices are always pinned precisely today, so this
+            // never actually renders as a ring — kept for consistency in
+            // case that ever changes.
             "circle-stroke-width": 2,
-            "circle-stroke-color": "#111827",
+            "circle-stroke-color": userCircleStrokeColor,
           },
         };
         map.addLayer(userCircleLayer);
@@ -221,6 +421,13 @@ export function MapHome() {
           if (current) void refreshUserOffices(current);
         }, MOVE_DEBOUNCE_MS);
       });
+
+      // Undebounced, unlike the office refetch: the hint explains why the
+      // map looks empty, so it has to track the zoom immediately rather than
+      // lagging 400ms behind the gesture that emptied it.
+      const syncZoomHint = () => setBelowOfficeZoom(map!.getZoom() < OFFICE_MIN_ZOOM);
+      syncZoomHint();
+      map.on("zoom", syncZoomHint);
     }
 
     init();
@@ -231,6 +438,7 @@ export function MapHome() {
       popupRef.current?.remove();
       map?.remove();
       mapRef.current = null;
+      backToAreaControlRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time init
   }, []);
@@ -248,22 +456,45 @@ export function MapHome() {
   }, []);
 
   // ---------------------------------------------------------------------
-  // Category filter -> layer filters.
+  // Back to my area: keep the control's bbox ref current, and add/remove
+  // the control itself as "somewhere to go back to" appears or disappears
+  // (first load, LocationPrompt selection, or skip). `loaded` is a
+  // dependency purely so this re-runs once `mapRef.current` is guaranteed
+  // set — the async map init can still be in flight when savedLocation
+  // first resolves.
   // ---------------------------------------------------------------------
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !loaded) return;
-    const filterExpr = [
-      "in",
-      ["get", "category"],
-      ["literal", Array.from(activeCategories)],
-    ] as unknown as NonNullable<Parameters<MapLibreMap["setFilter"]>[1]>;
+
+    const bbox = savedLocation?.kind === "place" ? savedLocation.bbox : null;
+    backToAreaBboxRef.current = bbox;
+
+    if (bbox && !backToAreaControlRef.current) {
+      const control = new BackToAreaControl(backToAreaBboxRef);
+      backToAreaControlRef.current = control;
+      map.addControl(control, "bottom-right");
+    } else if (!bbox && backToAreaControlRef.current) {
+      map.removeControl(backToAreaControlRef.current);
+      backToAreaControlRef.current = null;
+    }
+  }, [savedLocation, loaded]);
+
+  // ---------------------------------------------------------------------
+  // Filters (category/service/reports/approximate) -> layer filters.
+  // ---------------------------------------------------------------------
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !loaded) return;
+    const filterExpr = buildFilterExpression(filters) as unknown as NonNullable<
+      Parameters<MapLibreMap["setFilter"]>[1]
+    >;
     for (const layerId of FILTERABLE_LAYERS) {
       if (map.getLayer(layerId)) {
         map.setFilter(layerId, filterExpr);
       }
     }
-  }, [activeCategories, loaded]);
+  }, [filters, loaded]);
 
   async function refreshUserOffices(map: MapLibreMap) {
     const bounds = map.getBounds();
@@ -458,18 +689,6 @@ export function MapHome() {
     setPromptOpen(false);
   }
 
-  function toggleCategory(category: OfficeCategory) {
-    setActiveCategories((prev) => {
-      const next = new Set(prev);
-      if (next.has(category)) {
-        next.delete(category);
-      } else {
-        next.add(category);
-      }
-      return next;
-    });
-  }
-
   return (
     <div className="relative w-full h-dvh overflow-hidden">
       {/* w-full/h-full are load-bearing: maplibre-gl.css sets `.maplibregl-map
@@ -487,6 +706,16 @@ export function MapHome() {
         </div>
       ) : null}
 
+      {loaded && belowOfficeZoom ? (
+        // Centred rather than tucked in a corner: at this zoom the map has
+        // no pins at all, so this is the only thing explaining the emptiness.
+        <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 flex justify-center pointer-events-none z-[6]">
+          <p className="rounded-full bg-white/95 dark:bg-neutral-900/95 border border-black/10 dark:border-white/20 px-4 py-2 text-sm shadow-sm">
+            {strings.map.zoomInForOffices}
+          </p>
+        </div>
+      ) : null}
+
       <div className="absolute top-0 left-0 right-0 p-3 flex flex-col gap-2 z-10 pointer-events-none sm:flex-row sm:items-start sm:justify-between">
         <div className="pointer-events-auto flex flex-col gap-2 sm:flex-row sm:items-center">
           <LocationChip
@@ -494,7 +723,7 @@ export function MapHome() {
             onClick={() => setPromptOpen(true)}
           />
           <OfficeSearchBox onSelect={handleSearchSelect} />
-          <CategoryFilterBar active={activeCategories} onToggle={toggleCategory} />
+          <MapFilterPanel filters={filters} onChange={setFilters} />
         </div>
         <Link
           href="/add-office"

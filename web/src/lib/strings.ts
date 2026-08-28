@@ -40,6 +40,9 @@ export const strings = {
     },
     intro:
       "Tell us what happened. Your report is recorded in a tamper-evident log the moment you submit it, and you choose exactly how it can be used before anything is published.",
+    nav: {
+      back: "Back",
+    },
     auth: {
       heading: "Verify your email to continue",
       body: "We use a one-time code to confirm you're a real person and to let you follow up on this report later. We never publish your email address.",
@@ -53,6 +56,11 @@ export const strings = {
       verifyButton: "Verify",
       verifying: "Verifying…",
       resendButton: "Resend code",
+      // With verification moved to the end of the flow, a user holding a
+      // finished draft will mash resend. /api/auth/request-otp has a 60s
+      // per-email cooldown and 5/hour cap, so an unguarded button locks them
+      // out of submitting work they've already written.
+      resendIn: (seconds: number) => `Resend code in ${seconds}s`,
       changeEmailButton: "Use a different email",
     },
     details: {
@@ -126,6 +134,10 @@ export const strings = {
     loadingOffice: "Loading…",
     officeUnavailable: "Office details unavailable.",
     loadingMap: "Loading map…",
+    // Offices are hidden below a zoom floor (see buildFilterExpression in
+    // MapHome) because ~180k pins at country zoom is an unreadable blur.
+    // Without this hint an empty map just looks broken.
+    zoomInForOffices: "Zoom in to see offices",
     location: {
       heading: "Where are you?",
       body: "Tell us your city, district or state and we'll open the map there. You can change this at any time.",
@@ -146,6 +158,41 @@ export const strings = {
       rto: "RTO",
       other: "Other",
     } as const,
+    services: {
+      aadhaar: "Aadhaar",
+      passport_seva: "Passport Seva",
+      pension: "Pension",
+      banking: "Banking",
+      vehicle_registration: "Vehicle registration",
+      driving_licence: "Driving licence",
+      fir: "FIR",
+      land_records: "Land records",
+      birth_death_certificate: "Birth/death certificate",
+    } as const,
+    filters: {
+      button: "Filters",
+      heading: "Show on map",
+      close: "Close filters",
+      categoriesLabel: "Type of office",
+      servicesLabel: "Services offered",
+      withReportsLabel: "Only offices with reports",
+      approximateLabel: "Include approximate locations",
+      // ~155k post offices come from a directory with no coordinates, so
+      // they sit on their pincode's centroid. Off by default: showing them
+      // as if precisely located would be worse than not showing them.
+      approximateHint:
+        "Some offices have no exact coordinates yet and are placed near their pincode. Shown as hollow rings.",
+      reset: "Reset filters",
+      activeCount: (n: number) => (n === 1 ? "1 filter" : `${n} filters`),
+    },
+    controls: {
+      geolocate: "Show my location",
+      fullscreen: "Toggle fullscreen",
+      zoomIn: "Zoom in",
+      zoomOut: "Zoom out",
+      resetNorth: "Reset bearing to north",
+      backToArea: "Back to my area",
+    },
     errors: {
       invalidBbox: "Invalid map area.",
       invalidQuery: "Enter a search term.",
@@ -162,8 +209,21 @@ export const strings = {
     panelTitle: "Report assistant",
     disclosure:
       "This assistant is powered by an AI service that processes what you type. Don't include your name, email, or other contact details — verification happens separately and your identity is never part of the chat.",
-    emptyState:
-      "Tell me what happened — for example: “A clerk at the passport office asked me for ₹2,000 to process my application.” I'll help you find the office and put the report together. You review and submit it yourself at the end.",
+    // Shown by default; the full `disclosure` above sits behind the toggle.
+    // The warning stays on screen either way — it's what stops people typing
+    // their name into an LLM — but four lines of it above an empty
+    // transcript was most of the panel.
+    disclosureShort: "AI-powered — don't share personal details.",
+    disclosureShow: "Details",
+    disclosureHide: "Hide",
+    emptyState: "What happened?",
+    // Conversation openers. The assistant takes it from here — its system
+    // prompt already asks one question at a time and pins the office first.
+    starters: [
+      "A clerk asked me for a bribe",
+      "I was overcharged for a service",
+      "My file won't move without paying",
+    ],
     inputPlaceholder: "Describe what happened…",
     send: "Send",
     thinking: "Thinking…",
@@ -224,6 +284,12 @@ export const strings = {
     addressLabel: "Address (optional)",
     addressPlaceholder: "e.g. MG Road, near City Hospital",
     pinInstructions: "Click or drag the pin to the office's location.",
+    // Existing offices are now drawn on the pin map so people can see
+    // whether the office is already there before adding a duplicate.
+    existingNearby: "Grey dots are offices already on the map.",
+    duplicateWarning: (name: string) =>
+      `“${name}” is already mapped within about 100m, in the same category. Add this anyway only if it's genuinely a different office.`,
+    duplicateContinue: "Add it anyway",
     submit: "Submit office",
     submitting: "Submitting…",
     success: "Office added. Thanks for helping map it!",
@@ -243,6 +309,8 @@ export const strings = {
       categoryRequired: "Choose a category.",
       locationRequired: "Set a location on the map.",
       invalidBody: "Check the office details and try again.",
+      duplicateOffice:
+        "An office with almost the same name is already mapped within about 100m. If it's genuinely a different office, adjust the name or move the pin.",
       unauthorized: "Sign in to add an office.",
       rateLimited:
         "You've added the maximum number of offices for today. Try again tomorrow.",

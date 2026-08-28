@@ -11,13 +11,17 @@ import { strings } from "@/lib/strings";
 const CONSENT_TIERS = ["publish_named", "publish_anon", "escalate_only"] as const;
 type ConsentTier = (typeof CONSENT_TIERS)[number];
 
+// /api/auth/request-otp enforces a 60s per-email cooldown (and 5/hour cap).
+// Mirrored here purely for the resend button's countdown display.
+const RESEND_COOLDOWN_MS = 60_000;
+
 type Phase =
   | "loading"
   | "no-office"
-  | "auth-request"
-  | "auth-verify"
   | "details"
   | "consent"
+  | "auth-request"
+  | "auth-verify"
   | "submitting"
   | "success"
   | "fatal-error";
@@ -50,6 +54,19 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<{ status: 
   return { status: res.status, body };
 }
 
+/**
+ * Where a failed /api/complaints POST should send the user back to.
+ * Auth now happens last, right before this call, so a 401 here means the
+ * session that consent-time check approved has since expired — that's the
+ * only case that needs to redo verification rather than just retrying.
+ */
+function phaseAfterSubmitFailure(status: number, code: string | undefined): Phase {
+  if (status === 401) return "auth-request"; // session expired between verify and POST
+  if (code === "office_not_found") return "fatal-error";
+  if (status === 400) return "details"; // invalid_body — only the form can fix it
+  return "consent"; // 403/429/500/network — retry as-is
+}
+
 export function ReportForm() {
   const searchParams = useSearchParams();
   const officeId = searchParams.get("office");
@@ -61,10 +78,31 @@ export function ReportForm() {
   const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
+  const [resendReadyAt, setResendReadyAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
 
   const [details, setDetails] = useState<DetailsState>(EMPTY_DETAILS);
   const [consentTier, setConsentTier] = useState<ConsentTier>("publish_anon");
   const [complaintId, setComplaintId] = useState<string | null>(null);
+
+  // Ticks `now` once a second while a resend cooldown is active, so the
+  // button's label can count down. Scoped to only run while a cooldown is
+  // pending, and torn down below once it lapses, so it never leaks a
+  // timer that outlives its purpose (or the component).
+  useEffect(() => {
+    if (resendReadyAt === null) return;
+    const interval = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, [resendReadyAt]);
+
+  useEffect(() => {
+    if (resendReadyAt !== null && now >= resendReadyAt) {
+      setResendReadyAt(null);
+    }
+  }, [now, resendReadyAt]);
+
+  const resendSecondsRemaining =
+    resendReadyAt === null ? 0 : Math.max(0, Math.ceil((resendReadyAt - now) / 1000));
 
   useEffect(() => {
     let cancelled = false;
@@ -76,10 +114,9 @@ export function ReportForm() {
       }
 
       try {
-        const [officeRes, meRes] = await Promise.all([
-          fetchJson<OfficeContext>(`/api/complaints/office-context?id=${encodeURIComponent(officeId)}`),
-          fetchJson<{ authenticated: boolean }>("/api/auth/me"),
-        ]);
+        const officeRes = await fetchJson<OfficeContext>(
+          `/api/complaints/office-context?id=${encodeURIComponent(officeId)}`
+        );
         if (cancelled) return;
 
         if (officeRes.status !== 200) {
@@ -88,7 +125,13 @@ export function ReportForm() {
           return;
         }
         setOffice(officeRes.body);
-        setPhase(meRes.body.authenticated ? "details" : "auth-request");
+        // Auth is deliberately not checked here. The user now writes their
+        // report before verifying, and a session can expire in the gap
+        // between this mount and the eventual submit — so a mount-time
+        // authenticated flag wouldn't be trustworthy by the time it matters
+        // anyway. handleConsentContinue re-checks /api/auth/me right before
+        // it's acted on.
+        setPhase("details");
       } catch {
         if (!cancelled) {
           setPhase("fatal-error");
@@ -117,9 +160,12 @@ export function ReportForm() {
         }
       );
       if (status !== 200) {
+        // Stay on the current auth phase — the user may be holding a
+        // finished draft, and a 429 here must not strand it.
         setError(body.error?.message ?? strings.report.errors.serverError);
         return;
       }
+      setResendReadyAt(Date.now() + RESEND_COOLDOWN_MS);
       setPhase("auth-verify");
     } catch {
       setError(strings.report.errors.serverError);
@@ -145,7 +191,8 @@ export function ReportForm() {
         setError(body.error?.message ?? strings.report.errors.serverError);
         return;
       }
-      setPhase("details");
+      setPhase("submitting");
+      await submitComplaint();
     } catch {
       setError(strings.report.errors.serverError);
     } finally {
@@ -163,7 +210,32 @@ export function ReportForm() {
     setPhase("consent");
   }
 
-  async function handleFinalSubmit() {
+  // The sole auth gate, run right before submission. Reading
+  // `body.authenticated` off a non-200 response would silently treat a
+  // failed check as "not authenticated" and push an already-verified user
+  // into the OTP flow again, so a non-200 is handled explicitly instead.
+  async function handleConsentContinue() {
+    setError(null);
+    setAuthBusy(true);
+    try {
+      const { status, body } = await fetchJson<{ authenticated?: boolean }>("/api/auth/me");
+      if (status !== 200) {
+        setError(strings.report.errors.serverError);
+        return; // stay on consent
+      }
+      if (body.authenticated) {
+        await submitComplaint();
+        return;
+      }
+      setPhase("auth-request");
+    } catch {
+      setError(strings.report.errors.serverError);
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function submitComplaint() {
     if (!office) return;
     setError(null);
     setPhase("submitting");
@@ -171,25 +243,32 @@ export function ReportForm() {
     const bribeAmount = details.bribeAmount.trim() === "" ? undefined : Number(details.bribeAmount);
 
     try {
-      const { status, body } = await fetchJson<{ ok?: boolean; complaintId?: string; error?: { message: string } }>(
-        "/api/complaints",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            officeId: office.id,
-            serviceType: details.serviceType.trim(),
-            bribeAmount,
-            designation: details.designation.trim() === "" ? undefined : details.designation.trim(),
-            officerName: details.officerName.trim() === "" ? undefined : details.officerName.trim(),
-            narrative: details.narrative.trim(),
-            consentTier,
-          }),
-        }
-      );
+      const { status, body } = await fetchJson<{
+        ok?: boolean;
+        complaintId?: string;
+        error?: { message: string; code?: string };
+      }>("/api/complaints", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          officeId: office.id,
+          serviceType: details.serviceType.trim(),
+          bribeAmount,
+          designation: details.designation.trim() === "" ? undefined : details.designation.trim(),
+          officerName: details.officerName.trim() === "" ? undefined : details.officerName.trim(),
+          narrative: details.narrative.trim(),
+          consentTier,
+        }),
+      });
       if (status !== 200 || !body.ok || !body.complaintId) {
         setError(body.error?.message ?? strings.report.errors.serverError);
-        setPhase("consent");
+        const nextPhase = phaseAfterSubmitFailure(status, body.error?.code);
+        if (nextPhase === "auth-request") {
+          // The verified code is now stale; keep the email so they don't
+          // have to retype it, but drop the one-time code.
+          setCode("");
+        }
+        setPhase(nextPhase);
         return;
       }
       setComplaintId(body.complaintId);
@@ -222,85 +301,10 @@ export function ReportForm() {
           </p>
         )}
 
-        {phase === "fatal-error" && (
-          <p className="text-red-600 dark:text-red-400">{error}</p>
-        )}
-
-        {phase === "auth-request" && (
-          <form onSubmit={handleRequestOtp} className="flex flex-col gap-3">
-            <h2 className="text-lg font-semibold">{strings.report.auth.heading}</h2>
-            <p className="text-sm text-black/70 dark:text-white/70">{strings.report.auth.body}</p>
-            <label className="flex flex-col gap-1 text-sm">
-              {strings.report.auth.emailLabel}
-              <input
-                type="email"
-                required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder={strings.report.auth.emailPlaceholder}
-                className="border rounded px-3 py-2 bg-transparent"
-              />
-            </label>
-            {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
-            <button
-              type="submit"
-              disabled={authBusy}
-              className="rounded bg-foreground text-background px-4 py-2 font-medium disabled:opacity-50"
-            >
-              {authBusy ? strings.report.auth.sendingCode : strings.report.auth.sendCodeButton}
-            </button>
-          </form>
-        )}
-
-        {phase === "auth-verify" && (
-          <form onSubmit={handleVerifyOtp} className="flex flex-col gap-3">
-            <h2 className="text-lg font-semibold">{strings.report.auth.heading}</h2>
-            <p className="text-sm text-black/70 dark:text-white/70">
-              {strings.report.auth.codeSentTo(email)}
-            </p>
-            <label className="flex flex-col gap-1 text-sm">
-              {strings.report.auth.codeLabel}
-              <input
-                type="text"
-                inputMode="numeric"
-                pattern="\d{6}"
-                required
-                value={code}
-                onChange={(e) => setCode(e.target.value)}
-                placeholder={strings.report.auth.codePlaceholder}
-                className="border rounded px-3 py-2 bg-transparent tracking-widest"
-              />
-            </label>
-            {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
-            <button
-              type="submit"
-              disabled={authBusy}
-              className="rounded bg-foreground text-background px-4 py-2 font-medium disabled:opacity-50"
-            >
-              {authBusy ? strings.report.auth.verifying : strings.report.auth.verifyButton}
-            </button>
-            <div className="flex justify-between text-sm">
-              <button type="button" onClick={handleRequestOtp} className="underline">
-                {strings.report.auth.resendButton}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setPhase("auth-request");
-                  setCode("");
-                  setError(null);
-                }}
-                className="underline"
-              >
-                {strings.report.auth.changeEmailButton}
-              </button>
-            </div>
-          </form>
-        )}
-
         {phase === "details" && (
           <form onSubmit={handleDetailsSubmit} className="flex flex-col gap-4">
             <h2 className="text-lg font-semibold">{strings.report.details.heading}</h2>
+            <p className="text-sm text-black/70 dark:text-white/70">{strings.report.intro}</p>
 
             <label className="flex flex-col gap-1 text-sm">
               {strings.report.details.serviceTypeLabel}
@@ -420,17 +424,109 @@ export function ReportForm() {
                 onClick={() => setPhase("details")}
                 className="rounded border px-4 py-2 font-medium"
               >
-                Back
+                {strings.report.nav.back}
               </button>
               <button
                 type="button"
-                onClick={handleFinalSubmit}
-                className="flex-1 rounded bg-foreground text-background px-4 py-2 font-medium"
+                onClick={handleConsentContinue}
+                disabled={authBusy}
+                className="flex-1 rounded bg-foreground text-background px-4 py-2 font-medium disabled:opacity-50"
               >
                 {strings.report.consent.submitButton}
               </button>
             </div>
           </div>
+        )}
+
+        {phase === "auth-request" && (
+          <form onSubmit={handleRequestOtp} className="flex flex-col gap-3">
+            <h2 className="text-lg font-semibold">{strings.report.auth.heading}</h2>
+            <p className="text-sm text-black/70 dark:text-white/70">{strings.report.auth.body}</p>
+            <label className="flex flex-col gap-1 text-sm">
+              {strings.report.auth.emailLabel}
+              <input
+                type="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder={strings.report.auth.emailPlaceholder}
+                className="border rounded px-3 py-2 bg-transparent"
+              />
+            </label>
+            {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setPhase("consent");
+                  setError(null);
+                }}
+                className="rounded border px-4 py-2 font-medium"
+              >
+                {strings.report.nav.back}
+              </button>
+              <button
+                type="submit"
+                disabled={authBusy}
+                className="flex-1 rounded bg-foreground text-background px-4 py-2 font-medium disabled:opacity-50"
+              >
+                {authBusy ? strings.report.auth.sendingCode : strings.report.auth.sendCodeButton}
+              </button>
+            </div>
+          </form>
+        )}
+
+        {phase === "auth-verify" && (
+          <form onSubmit={handleVerifyOtp} className="flex flex-col gap-3">
+            <h2 className="text-lg font-semibold">{strings.report.auth.heading}</h2>
+            <p className="text-sm text-black/70 dark:text-white/70">
+              {strings.report.auth.codeSentTo(email)}
+            </p>
+            <label className="flex flex-col gap-1 text-sm">
+              {strings.report.auth.codeLabel}
+              <input
+                type="text"
+                inputMode="numeric"
+                pattern="\d{6}"
+                required
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+                placeholder={strings.report.auth.codePlaceholder}
+                className="border rounded px-3 py-2 bg-transparent tracking-widest"
+              />
+            </label>
+            {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+            <button
+              type="submit"
+              disabled={authBusy}
+              className="rounded bg-foreground text-background px-4 py-2 font-medium disabled:opacity-50"
+            >
+              {authBusy ? strings.report.auth.verifying : strings.report.auth.verifyButton}
+            </button>
+            <div className="flex justify-between text-sm">
+              <button
+                type="button"
+                onClick={handleRequestOtp}
+                disabled={authBusy || resendSecondsRemaining > 0}
+                className="underline disabled:opacity-50 disabled:no-underline"
+              >
+                {resendSecondsRemaining > 0
+                  ? strings.report.auth.resendIn(resendSecondsRemaining)
+                  : strings.report.auth.resendButton}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setPhase("auth-request");
+                  setCode("");
+                  setError(null);
+                }}
+                className="underline"
+              >
+                {strings.report.auth.changeEmailButton}
+              </button>
+            </div>
+          </form>
         )}
 
         {phase === "submitting" && (
@@ -460,6 +556,10 @@ export function ReportForm() {
               </Link>
             </div>
           </div>
+        )}
+
+        {phase === "fatal-error" && (
+          <p className="text-red-600 dark:text-red-400">{error}</p>
         )}
       </div>
     </div>

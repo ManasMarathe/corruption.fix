@@ -9,7 +9,10 @@
     "extract": "bash 02-extract.sh",
     "import": "node 03-import.mjs",
     "tiles": "bash 04-tiles.sh",
-    "all": "npm run download && npm run extract && npm run import && npm run tiles"
+    "sources": "node 05-sources/fetch-all.mjs",
+    "merge": "node 06-merge.mjs",
+    "all": "npm run download && npm run extract && npm run import && npm run tiles",
+    "test": "node --test lib/*.test.mjs 05-sources/*.test.mjs"
   },
   "dependencies": {
     "postgres": "^3.4.9",

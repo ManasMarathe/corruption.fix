@@ -120,3 +120,126 @@ Every step is idempotent:
 - `03-import.mjs` upserts on `lgd_code` (states/districts) and `osm_id`
   (offices) — safe to re-run after a fresh extract.
 - `04-tiles.sh` overwrites `offices.pmtiles` in place (`tippecanoe --force`).
+
+## Government-dataset import (steps 5-6)
+
+OSM covers a tiny fraction of India's government offices — verified counts
+from this pipeline's own extract vs. reality: post offices 5,385 in OSM vs.
+~155,000 real (~3%); police 4,536 vs. ~17,500; courts 799 vs. ~3,500; RTOs
+164 vs. ~1,400. Steps 5 and 6 close that gap by importing authoritative
+government datasets alongside OSM, instead of relying on OSM alone.
+
+### ⚠️ Importing rows does NOT put them on the map
+
+`/api/offices?bbox=` (the live API route) only ever returns `source='user'`
+rows. **Every other pin on the map — including everything steps 5/6 import —
+is drawn from the static `web/public/tiles/offices.pmtiles` file**, built by
+`04-tiles.sh` from a GeoJSON export of the `offices` table at build time.
+Running `npm run sources` / `npm run merge` only changes rows in Postgres.
+**To make imported offices actually visible, you must re-run `npm run
+tiles` (04-tiles.sh) afterwards and redeploy `offices.pmtiles`.** This is
+easy to forget and produces a confusing "I imported 50k offices but the map
+looks the same" result — don't skip it.
+
+### Step 5 — `pipeline/05-sources/*.mjs`
+
+One module per upstream dataset, all exporting the same interface:
+
+```js
+export const source = "indiapost";      // matches offices.source
+export async function fetchRaw(ctx)      // -> raw rows, cached to data/raw/<source>.json
+export function normalize(rows)          // -> CanonicalOffice[]
+```
+
+| module | status | endpoint |
+|---|---|---|
+| `indiapost.mjs` | **working**, no key needed | `https://api.postalpincode.in/pincode/<pincode>` — confirmed live. Returns **no lat/lng**, so every row is `location_precision: 'approximate'` until resolved against a pincode centroid (step 6). Also has an unverified `DATA_GOV_IN_API_KEY`-gated data.gov.in path (resource id scraped from the live catalog page but never confirmed against a real key — see the file's header comment); the postalpincode.in path is used regardless of whether the key is set. |
+| `uidai.mjs` | **stubbed** | No open, scriptable dataset of Aadhaar enrolment-*center locations* (address/coordinates) was found — data.gov.in's Aadhaar datasets are aggregate enrolment statistics by pincode/age-group, a different shape of data. `fetchRaw()` logs why and returns `[]`; `normalize()` is fully implemented and unit-tested against a fixture. |
+| `parivahan.mjs` | **stubbed** | parivahan.gov.in / Vahan / Sarathi are interactive portals; no documented RTO/DTO office-directory API or dataset was found. Same treatment as `uidai.mjs`. |
+| `ecourts.mjs` | **stubbed** | services.ecourts.gov.in backs its own state → district → court-complex picker with an undocumented internal API; only paid third-party wrappers were found, not treated as authoritative. Same treatment as `uidai.mjs`. |
+
+`DATA_GOV_IN_API_KEY` — read from the environment by `indiapost.mjs` (and
+checked, for logging purposes, by `uidai.mjs`). `api.data.gov.in` returns
+HTTP 400 ("Authorization field missing") without one — confirmed via curl.
+None of the four modules crash the pipeline when it's unset; they log
+clearly and continue.
+
+`data/pincodes.json` — `indiapost.mjs` needs a master list of India's
+~19,300 pincodes to enumerate via api.postalpincode.in (that API can only
+look pincodes *up*, not list them). No scriptable, unauthenticated source
+for the full list was found either. Drop a JSON array of 6-digit pincode
+strings at `pipeline/data/pincodes.json` to fetch the real thing; absent
+that file, `fetchRaw()` logs a warning and falls back to a 10-pincode seed
+list so the client can still be exercised end-to-end.
+
+Run:
+
+```
+node 05-sources/indiapost.mjs --smoke-test   # 3 live pincode lookups, prints normalized rows
+npm run sources                              # runs fetchRaw+normalize for all four, writes
+                                              # data/raw/<source>.canonical.json
+```
+
+Every module caches its raw fetch to `pipeline/data/raw/<source>.json`
+(gitignored, same as the rest of `data/`) and resumes from that cache on
+the next run — safe to interrupt.
+
+### Step 6 — `06-merge.mjs`
+
+Loads all four source modules, normalizes their rows, dedups against the
+`offices` table (mostly OSM today) **and against each other**, then upserts
+idempotently on `(source, source_ref)` and writes `office_services` rows.
+
+**Dedup policy** (implemented in `pipeline/lib/canonical.mjs`, unit-tested
+in `canonical.test.mjs`):
+
+- **Tier A — geometric** (`isProbableDuplicate`): same `category`, AND
+  normalized names equal or one contains the other, AND either both
+  offices have coordinates within 500m, or neither has coordinates and
+  they share a pincode/district. Since `offices.geom` is `NOT NULL`, every
+  row already in the table always has real coordinates, so this is the
+  primary check once an incoming row's own coordinates are resolved.
+- **Tier B — text fallback** (`06-merge.mjs` only, not part of
+  `canonical.mjs`'s tested API): used when a row's coordinates are only a
+  pincode centroid (`location_precision: 'approximate'`) — a 500m radius
+  against an area centroid is unreliable in both directions. Matches on
+  normalized name (equal/containment) plus the incoming row's district
+  appearing in the candidate's free-text address (`offices.district_id` is
+  NULL for v1 OSM rows, so there's no structured join to use instead). A
+  row counts as a duplicate if **either** tier fires — a missed genuinely-new
+  office is a far better failure mode here than a doubled pin.
+- **`chooseWinner`**: on a match, the existing row's geometry is kept
+  (OSM/whatever's already there is `'exact'`; the incoming government row
+  is usually `'approximate'`), its name/services are overwritten with the
+  government row's (authoritative), and services are unioned. No new
+  `offices` row is inserted for a match — only a genuinely new office gets
+  one.
+- Re-running `06-merge.mjs` for the same source is idempotent via the
+  `offices_source_ref_key` partial unique index on `(source, source_ref)
+  WHERE source_ref IS NOT NULL`.
+
+**Pincode-centroid fallback**: rows with no coordinates (currently: every
+`indiapost` row) are resolved against `pipeline/data/pincode-centroids.csv`
+— a GeoNames-derived (CC BY 4.0) India postal-code centroid table,
+auto-downloaded on first run from
+`https://raw.githubusercontent.com/sanand0/pincode/master/data/IN.csv` and
+cached locally (~11,000 of India's ~19,300 pincodes — not exhaustive). A
+row whose pincode isn't in the table is **left un-inserted**; the count is
+logged at the end of the run rather than guessing a coordinate.
+
+Run:
+
+```
+npm run merge   # node 06-merge.mjs
+```
+
+Batched inserts (500/batch), `postgres` + `uuid`'s `v7()` ids, progress
+logged every 5,000 rows processed per source — same conventions as
+`03-import.mjs`. Verified against a live-but-rolled-back transaction
+against the real `offices`/`office_services` schema while writing this
+(the exact `INSERT ... ON CONFLICT` shapes work); the dedup index/lookup
+logic (`createIndex`/`addToIndex`/`findDuplicate`, all pure and exported
+from `06-merge.mjs`) was exercised directly against synthetic OSM + gov
+rows covering both tiers. It was **not** run end-to-end against the real
+~19,300-pincode India Post enumeration in this environment (no master
+pincode list, see above) — only the 3-pincode smoke test.

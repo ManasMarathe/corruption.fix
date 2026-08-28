@@ -11,7 +11,12 @@ const RESULT_LIMIT = 10;
 
 const querySchema = z.string().trim().min(1).max(100);
 
-/** GET /api/offices/search?q= — ILIKE %q% over office names, capped at 10. */
+/**
+ * GET /api/offices/search?q= — ILIKE %q% over office names, capped at 10.
+ * Each result includes `services` (e.g. so the UI can show "Post office ·
+ * Aadhaar") — see the `OfficePoint`/`OFFICE_POINT_COLUMNS` comments in
+ * lib/offices.ts for how that's populated without fanning out rows.
+ */
 export async function GET(request: NextRequest) {
   const raw = request.nextUrl.searchParams.get("q") ?? "";
   const parsed = querySchema.safeParse(raw);

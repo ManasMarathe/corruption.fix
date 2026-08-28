@@ -3,10 +3,13 @@ import { and, desc, eq, ilike, sql } from "drizzle-orm";
 import { db } from "@/db";
 import {
   complaints,
+  officeServices,
   officeViewCounts,
   officers,
   offices,
+  type LocationPrecision,
   type OfficeCategory,
+  type OfficeService,
 } from "@/db/schema";
 import { newId } from "./uuid";
 
@@ -29,6 +32,8 @@ export interface OfficePoint {
   lng: number;
   lat: number;
   address: string | null;
+  locationPrecision: LocationPrecision;
+  services: OfficeService[];
 }
 
 const OFFICE_POINT_COLUMNS = {
@@ -38,6 +43,16 @@ const OFFICE_POINT_COLUMNS = {
   address: offices.address,
   lng: sql<number>`ST_X(${offices.geom})`,
   lat: sql<number>`ST_Y(${offices.geom})`,
+  locationPrecision: offices.locationPrecision,
+  // Correlated subquery rather than a JOIN, so an office with multiple
+  // services doesn't fan out into duplicate `offices` rows that every
+  // caller here would then have to de-dupe. Empty array (not null) when the
+  // office has no rows in office_services.
+  services: sql<OfficeService[]>`coalesce((
+    select array_agg(${officeServices.service})
+    from ${officeServices}
+    where ${officeServices.officeId} = ${offices.id}
+  ), '{}')`,
 };
 
 export async function searchOffices(
@@ -70,20 +85,34 @@ export interface Bbox {
   maxLat: number;
 }
 
-/** User-added (`source = 'user'`) offices intersecting `bbox`, capped at `limit`. */
+/**
+ * User-added (`source = 'user'`) offices intersecting `bbox`, capped at
+ * `limit`. `services`, when given, restricts to offices offering at least
+ * one of the listed services — an EXISTS check rather than a JOIN, for the
+ * same no-fan-out reason as the `services` column above.
+ */
 export async function userOfficesInBbox(
   bbox: Bbox,
-  limit: number
+  limit: number,
+  services?: OfficeService[]
 ): Promise<OfficePoint[]> {
+  const conditions = [
+    eq(offices.source, "user"),
+    sql`ST_MakeEnvelope(${bbox.minLng}, ${bbox.minLat}, ${bbox.maxLng}, ${bbox.maxLat}, 4326) && ${offices.geom}`,
+  ];
+  if (services && services.length > 0) {
+    conditions.push(
+      sql`exists (
+        select 1 from ${officeServices}
+        where ${officeServices.officeId} = ${offices.id}
+        and ${officeServices.service} = any(${services})
+      )`
+    );
+  }
   const rows = await db
     .select(OFFICE_POINT_COLUMNS)
     .from(offices)
-    .where(
-      and(
-        eq(offices.source, "user"),
-        sql`ST_MakeEnvelope(${bbox.minLng}, ${bbox.minLat}, ${bbox.maxLng}, ${bbox.maxLat}, 4326) && ${offices.geom}`
-      )
-    )
+    .where(and(...conditions))
     .limit(limit);
   return rows as OfficePoint[];
 }
@@ -116,6 +145,10 @@ export async function insertUserOffice(
     lng: input.lng,
     lat: input.lat,
     address: input.address ?? null,
+    // Matches the DB defaults `insertUserOffice` relies on above: a
+    // human-placed pin is exact, and a brand-new office has no services yet.
+    locationPrecision: "exact",
+    services: [],
     status: "user_added",
   };
 }

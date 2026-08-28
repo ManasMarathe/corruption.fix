@@ -8,6 +8,9 @@ export const CATEGORY_LABELS = {
   court: "Court",
   govt_office: "Government office",
   rto: "RTO",
+  // amenity=townhall / office=administrative — see categoryFor() below for
+  // why these land in "other" rather than "govt_office".
+  other: "Administrative office",
 };
 
 /** Feature -> {type: "node"|"way"|"relation", id: string} | null */
@@ -28,6 +31,26 @@ export function extractIdType(feature) {
   return null;
 }
 
+// RTO-name detection regex, checked against tags.name AND the vernacular
+// name:hi/name:mr fields. "RTO|Regional Transport" alone matched only ~164
+// of India's ~1,400 real RTOs, because most are tagged only in Hindi/Marathi
+// (OSM contributors overwhelmingly use the local script for these, not
+// English). Added:
+//   - "परिवहन" (Devanagari "transport") — covers "प्रादेशिक परिवहन कार्यालय"
+//     (Regional Transport Office) and shorter local variants like
+//     "परिवहन कार्यालय" that drop "प्रादेशिक".
+//   - "आरटीओ" — the Devanagari transliteration of the "RTO" initialism
+//     itself, which shows up almost as often as the full translated name.
+const RTO_NAME_RE = /RTO|Regional Transport|परिवहन|आरटीओ/i;
+
+/** True when `tags` carries a real place name (vs. relying on the "(unnamed)"
+ * fallback in nameFor()). Exported so lib/prepare-tiles-geojson.mjs can bias
+ * tippecanoe's dot-dropping to keep named features first — see 04-tiles.sh. */
+export function hasName(tags) {
+  const raw = tags.name || tags["name:en"];
+  return Boolean(raw && raw.trim());
+}
+
 /** OSM tags -> one of offices.category, or null if nothing matches. */
 export function categoryFor(tags) {
   if (tags.amenity === "police") return "police";
@@ -35,8 +58,23 @@ export function categoryFor(tags) {
   if (tags.amenity === "courthouse") return "court";
   if (tags.office === "government") {
     const name = tags.name || "";
-    if (/RTO|Regional Transport/i.test(name)) return "rto";
+    const nameHi = tags["name:hi"] || "";
+    const nameMr = tags["name:mr"] || "";
+    if (RTO_NAME_RE.test(name) || RTO_NAME_RE.test(nameHi) || RTO_NAME_RE.test(nameMr)) {
+      return "rto";
+    }
     return "govt_office";
+  }
+  // amenity=townhall / office=administrative (added to the 02-extract.sh tag
+  // filter alongside office=government) are municipal/administrative bodies
+  // — nagar palika, panchayat offices, municipal corporation buildings —
+  // rather than state/central government departments, so lumping them into
+  // "govt_office" would blur a real distinction the map cares about. "other"
+  // already exists end-to-end (DB check constraint, OFFICE_CATEGORIES,
+  // CATEGORY_LIST, map legend/filter) but nothing ever produced it before
+  // this — these two tags are the first (and, for now, only) source of it.
+  if (tags.amenity === "townhall" || tags.office === "administrative") {
+    return "other";
   }
   return null;
 }
