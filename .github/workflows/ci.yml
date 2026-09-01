@@ -23,10 +23,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Node 24, matching the runtime the project is configured for on
+      # Vercel. Not a free choice: ai@7 and every @ai-sdk/* package declare
+      # engines.node >=22, and package-lock.json was authored by npm 11 —
+      # the npm 10 that ships with Node 20 fails to resolve tsx nested copy
+      # of esbuild out of it and aborts npm ci with EUSAGE.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: web/package-lock.json
 
@@ -63,7 +68,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: web/package-lock.json
 
