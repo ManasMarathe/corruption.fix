@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type {
   CircleLayerSpecification,
@@ -9,13 +9,23 @@ import type {
   IControl,
   Map as MapLibreMap,
   MapLayerMouseEvent,
+  Marker as MapLibreMarker,
   Popup as MapLibrePopup,
   SymbolLayerSpecification,
 } from "maplibre-gl";
 import type { DataDrivenPropertyValueSpecification } from "@maplibre/maplibre-gl-style-spec";
 import type { OfficeCategory } from "@/db/schema";
 import { CATEGORY_COLORS, categoryColorExpression } from "@/lib/categories";
+import { haversineKm } from "@/lib/distance";
 import { INDIA_BOUNDS, type BBox, type GeocodePlace } from "@/lib/geocode";
+import { defaultMapFilters, type MapFilters } from "@/lib/map-filters";
+import {
+  mapStateToSearch,
+  parseMapFilters,
+  parseMapFocus,
+  parseMapView,
+  type MapFocus,
+} from "@/lib/map-url";
 import {
   readSavedLocation,
   savedLocationFromPlace,
@@ -24,9 +34,10 @@ import {
   type SavedLocation,
 } from "@/lib/saved-location";
 import { strings } from "@/lib/strings";
-import { defaultMapFilters, MapFilterPanel, type MapFilters } from "./MapFilterPanel";
+import { MapFilterPanel } from "./MapFilterPanel";
 import { LocationChip } from "./LocationChip";
 import { LocationPrompt } from "./LocationPrompt";
+import { OfficeListPanel, type VisibleOffice } from "./OfficeListPanel";
 import { OfficeSearchBox, type OfficeSearchResult } from "./OfficeSearchBox";
 
 // Dynamically imported at runtime (see the init effect below) — maplibre-gl
@@ -52,6 +63,10 @@ const OFFICE_MIN_ZOOM = 8;
 const MOVE_DEBOUNCE_MS = 400;
 const USER_OFFICES_LIMIT = 500;
 
+// Rows the viewport list shows. A dense city view can render a few thousand
+// pins; past ~50 the list stops being a list and the header says so.
+const VISIBLE_LIST_LIMIT = 50;
+
 // A Nominatim *node* result (a village, a single building) has a
 // near-degenerate bbox that would otherwise fit to street level. Belt-and-
 // braces with expandTinyBbox in src/lib/geocode.ts.
@@ -70,9 +85,11 @@ const FIT_BOUNDS_OPTIONS = { padding: 24, maxZoom: 14 } as const;
  */
 class BackToAreaControl implements IControl {
   private readonly bboxRef: { current: BBox | null };
+  private readonly onNavigate: () => void;
 
-  constructor(bboxRef: { current: BBox | null }) {
+  constructor(bboxRef: { current: BBox | null }, onNavigate: () => void) {
     this.bboxRef = bboxRef;
+    this.onNavigate = onNavigate;
   }
 
   onAdd(map: MapLibreMap): HTMLElement {
@@ -86,7 +103,11 @@ class BackToAreaControl implements IControl {
     button.textContent = "⌂"; // house glyph — simple, no icon font/SVG needed
     button.addEventListener("click", () => {
       const bbox = this.bboxRef.current;
-      if (bbox) map.fitBounds(bbox, FIT_BOUNDS_OPTIONS);
+      if (!bbox) return;
+      // Checkpoint first: this is a discrete jump, so the browser's back
+      // button should return to wherever the user was looking.
+      this.onNavigate();
+      map.fitBounds(bbox, FIT_BOUNDS_OPTIONS);
     });
 
     container.appendChild(button);
@@ -96,6 +117,32 @@ class BackToAreaControl implements IControl {
   onRemove(): void {
     // Nothing to tear down beyond the DOM node maplibre itself removes —
     // no listeners were attached outside `container`.
+  }
+}
+
+/**
+ * Overrides the English on maplibre's own control buttons so the map speaks
+ * the same words as the rest of the chrome, and so the keyboard shortcuts
+ * are discoverable from the buttons themselves. The strings existed in
+ * `strings.map.controls` but nothing applied them until now.
+ *
+ * Fullscreen relabels itself when toggled, so this is a first-paint
+ * improvement there rather than a permanent one — worth it for the other
+ * four, which never change.
+ */
+function applyControlLabels(container: HTMLElement): void {
+  const labels: Array<[string, string]> = [
+    [".maplibregl-ctrl-zoom-in", strings.map.controls.zoomIn],
+    [".maplibregl-ctrl-zoom-out", strings.map.controls.zoomOut],
+    [".maplibregl-ctrl-compass", strings.map.controls.resetNorth],
+    [".maplibregl-ctrl-geolocate", strings.map.controls.geolocate],
+    [".maplibregl-ctrl-fullscreen", strings.map.controls.fullscreen],
+  ];
+  for (const [selector, label] of labels) {
+    const button = container.querySelector<HTMLElement>(selector);
+    if (!button) continue;
+    button.title = label;
+    button.setAttribute("aria-label", label);
   }
 }
 
@@ -189,6 +236,18 @@ interface ApiOfficePoint {
   address: string | null;
 }
 
+/** The ring that marks the row the pointer is over in the results list. */
+function buildHighlightElement(): HTMLDivElement {
+  const element = document.createElement("div");
+  element.style.width = "26px";
+  element.style.height = "26px";
+  element.style.borderRadius = "9999px";
+  element.style.border = "3px solid #111827";
+  element.style.boxShadow = "0 0 0 3px rgba(255,255,255,0.9)";
+  element.style.pointerEvents = "none";
+  return element;
+}
+
 export function MapHome() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
@@ -196,6 +255,8 @@ export function MapHome() {
   const popupRef = useRef<MapLibrePopup | null>(null);
   const popupTokenRef = useRef(0);
   const moveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const highlightMarkerRef = useRef<MapLibreMarker | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   // Read by BackToAreaControl's click handler; kept current by the "back to
   // area" effect below rather than by rebuilding the control on every
   // savedLocation change.
@@ -217,6 +278,120 @@ export function MapHome() {
   const [savedLocation, setSavedLocation] = useState<SavedLocation | null>(null);
   const [promptOpen, setPromptOpen] = useState(false);
 
+  const [listOpen, setListOpen] = useState(false);
+  const [visibleOffices, setVisibleOffices] = useState<VisibleOffice[]>([]);
+  const [listTruncated, setListTruncated] = useState(false);
+  const [listStale, setListStale] = useState(false);
+
+  // Map event handlers are registered once, inside the init effect, so they
+  // close over the first render's state. Everything they need to read that
+  // can change afterwards goes through a ref instead.
+  const filtersRef = useRef(filters);
+  const loadedRef = useRef(false);
+  const listOpenRef = useRef(false);
+  const focusRef = useRef<MapFocus | null>(null);
+
+  useEffect(() => {
+    filtersRef.current = filters;
+  }, [filters]);
+  useEffect(() => {
+    listOpenRef.current = listOpen;
+  }, [listOpen]);
+
+  // ---------------------------------------------------------------------
+  // URL <-> view. `replaceState` for pans and filter changes (a hundred
+  // history entries per drag would bury the back button), `pushState` only
+  // for discrete jumps — search, place, "back to my area".
+  // ---------------------------------------------------------------------
+  const writeUrl = useCallback(() => {
+    const map = mapRef.current;
+    if (!map || !loadedRef.current) return;
+    const center = map.getCenter();
+    const search = mapStateToSearch(
+      { lng: center.lng, lat: center.lat, zoom: map.getZoom() },
+      filtersRef.current,
+      focusRef.current
+    );
+    // Skipping an identical write keeps `replaceState` off the hot path of
+    // every settled gesture.
+    if (search === window.location.search) return;
+    window.history.replaceState(null, "", `${window.location.pathname}${search}`);
+  }, []);
+
+  /**
+   * Duplicates the current entry before a discrete jump, so the entry left
+   * behind holds where the user *was* and the new one gets overwritten by
+   * the `moveend` that follows. That avoids having to predict the
+   * destination's zoom, which `fitBounds` decides for itself.
+   */
+  const pushHistoryCheckpoint = useCallback(() => {
+    if (!loadedRef.current) return;
+    window.history.pushState(null, "", `${window.location.pathname}${window.location.search}`);
+  }, []);
+
+  // ---------------------------------------------------------------------
+  // Viewport list. Sourced from what maplibre has actually drawn rather
+  // than from /api/offices?bbox= — that route returns only user-added
+  // offices, while the ~180k imported ones live in the pmtiles source.
+  // queryRenderedFeatures sees both, already filtered and zoom-gated.
+  // ---------------------------------------------------------------------
+  const collectVisibleOffices = useCallback((map: MapLibreMap): VisibleOffice[] => {
+    const layers = CLICKABLE_LAYERS.filter((id) => map.getLayer(id));
+    if (layers.length === 0) return [];
+
+    const center = map.getCenter();
+    const byKey = new Map<string, VisibleOffice>();
+
+    for (const feature of map.queryRenderedFeatures({ layers })) {
+      if (feature.geometry.type !== "Point") continue;
+      const props = (feature.properties ?? {}) as Record<string, unknown>;
+
+      const id = typeof props.id === "string" ? props.id : null;
+      const osmUidRaw = Number(props.osm_uid);
+      const osmUid = Number.isFinite(osmUidRaw) ? osmUidRaw : null;
+      // A pin the tiles cut across two tiles comes back twice; and one with
+      // neither identifier can't be opened, so it has no place in the list.
+      const key = id ? `office:${id}` : osmUid !== null ? `osm:${osmUid}` : null;
+      if (!key || byKey.has(key)) continue;
+
+      const [lng, lat] = feature.geometry.coordinates as [number, number];
+      byKey.set(key, {
+        key,
+        id,
+        osmUid,
+        name: typeof props.name === "string" ? props.name : "",
+        category: ((props.category as string) ?? "other") as OfficeCategory,
+        lng,
+        lat,
+        distanceKm: haversineKm([center.lng, center.lat], [lng, lat]),
+      });
+    }
+
+    return [...byKey.values()].sort((a, b) => a.distanceKm - b.distanceKm);
+  }, []);
+
+  const rebuildList = useCallback(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    const apply = (all: VisibleOffice[]) => {
+      setVisibleOffices(all.slice(0, VISIBLE_LIST_LIMIT));
+      setListTruncated(all.length > VISIBLE_LIST_LIMIT);
+      setListStale(false);
+    };
+
+    const all = collectVisibleOffices(map);
+    apply(all);
+    // Opening the panel mid-tile-load queries a map that hasn't drawn
+    // anything yet; retry once when it settles rather than showing a
+    // permanent "no offices in this view".
+    if (all.length === 0 && !map.isStyleLoaded()) {
+      map.once("idle", () => {
+        if (listOpenRef.current) apply(collectVisibleOffices(map));
+      });
+    }
+  }, [collectVisibleOffices]);
+
   // ---------------------------------------------------------------------
   // Map init (once).
   // ---------------------------------------------------------------------
@@ -230,10 +405,11 @@ export function MapHome() {
       // the constructor. That's what avoids a flash of the India view (and a
       // wasted fitBounds animation) on every return visit.
       //
-      // Precedence is ?lat&lng > saved area > India. focusFromQueryParams
-      // would win visually anyway, but short-circuiting here avoids fitting
-      // to a bbox we're about to discard.
-      const saved = hasFocusQueryParams() ? null : readSavedLocation();
+      // Precedence is ?lat&lng > saved area > India. The URL view would win
+      // visually anyway, but short-circuiting here avoids fitting to a bbox
+      // we're about to discard.
+      const urlView = parseMapView(new URLSearchParams(window.location.search));
+      const saved = urlView ? null : readSavedLocation();
 
       const [maplibregl, { Protocol }] = await Promise.all([
         import("maplibre-gl"),
@@ -278,6 +454,8 @@ export function MapHome() {
       // `attributionControl: false` above.
       map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-left");
       map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-left");
+
+      applyControlLabels(containerRef.current);
 
       map.on("load", () => {
         if (cancelled || !map) return;
@@ -410,15 +588,28 @@ export function MapHome() {
         map.on("click", CLICKABLE_LAYERS, (e) => handleFeatureClick(map!, e));
 
         setLoaded(true);
+        loadedRef.current = true;
         void refreshUserOffices(map);
-        focusFromQueryParams(map);
+        applyUrlState(map);
+        // Stamp the resolved view so the address bar is shareable from the
+        // first paint — but NOT on a true first visit, where the location
+        // prompt is on screen. Writing there would put a view in the URL
+        // that `parseMapView` then reads back on reload as a deep link,
+        // suppressing the prompt the visitor never actually answered. Their
+        // first real interaction stamps it instead.
+        if (urlView || saved) writeUrl();
       });
 
       map.on("moveend", () => {
         if (moveDebounceRef.current) clearTimeout(moveDebounceRef.current);
         moveDebounceRef.current = setTimeout(() => {
           const current = mapRef.current;
-          if (current) void refreshUserOffices(current);
+          if (!current) return;
+          void refreshUserOffices(current);
+          writeUrl();
+          // Google-Maps behaviour: panning offers to re-run the search
+          // rather than silently rewriting the list under the pointer.
+          if (listOpenRef.current) setListStale(true);
         }, MOVE_DEBOUNCE_MS);
       });
 
@@ -434,8 +625,11 @@ export function MapHome() {
 
     return () => {
       cancelled = true;
+      loadedRef.current = false;
       if (moveDebounceRef.current) clearTimeout(moveDebounceRef.current);
       popupRef.current?.remove();
+      highlightMarkerRef.current?.remove();
+      highlightMarkerRef.current = null;
       map?.remove();
       mapRef.current = null;
       backToAreaControlRef.current = null;
@@ -444,16 +638,99 @@ export function MapHome() {
   }, []);
 
   // ---------------------------------------------------------------------
-  // Saved area (once, after mount). The init effect reads storage too; two
-  // reads is intentional and cheap — both run once and see the same data,
-  // and it keeps the constructor's bounds independent of React state.
+  // Saved area + URL filters (once, after mount). The init effect reads
+  // storage too; two reads is intentional and cheap — both run once and see
+  // the same data, and it keeps the constructor's bounds independent of
+  // React state. Filters come from the URL here rather than from a lazy
+  // useState initializer for the same SSR reason as savedLocation.
   // ---------------------------------------------------------------------
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    setFilters(parseMapFilters(params));
+
     const saved = readSavedLocation();
     setSavedLocation(saved);
     // Nothing stored and no deep link — this is a first visit, so ask.
-    if (!saved && !hasFocusQueryParams()) setPromptOpen(true);
+    if (!saved && !parseMapView(params)) setPromptOpen(true);
   }, []);
+
+  // ---------------------------------------------------------------------
+  // Back/forward. The router never changes — only the query string — so
+  // this re-applies the popped view, filters and pin in place.
+  // ---------------------------------------------------------------------
+  useEffect(() => {
+    function handlePopState() {
+      const map = mapRef.current;
+      if (!map) return;
+
+      const params = new URLSearchParams(window.location.search);
+      setFilters(parseMapFilters(params));
+
+      popupRef.current?.remove();
+      const view = parseMapView(params);
+      if (view) map.jumpTo({ center: [view.lng, view.lat], zoom: view.zoom });
+
+      const focus = parseMapFocus(params);
+      if (focus && view) {
+        openPopup(map, [view.lng, view.lat], focus.name, focus.category, focus.id);
+      }
+    }
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reads refs only
+  }, []);
+
+  // ---------------------------------------------------------------------
+  // Keyboard shortcuts. Skipped while the user is typing, and while a modal
+  // owns Escape — LocationPrompt and MapFilterPanel each handle their own.
+  // ---------------------------------------------------------------------
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      const target = e.target as HTMLElement | null;
+      const typing =
+        !!target &&
+        (target.isContentEditable ||
+          target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT");
+
+      // Cmd/Ctrl+K works even from inside a field — it only ever refocuses
+      // the search box, which is what the user asked for either way.
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+        return;
+      }
+      if (typing) return;
+      if (e.key === "/") {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+        return;
+      }
+      if (promptOpen) return;
+
+      const map = mapRef.current;
+      if (!map) return;
+
+      if (e.key === "+" || e.key === "=") {
+        e.preventDefault();
+        map.zoomIn();
+      } else if (e.key === "-" || e.key === "_") {
+        e.preventDefault();
+        map.zoomOut();
+      } else if (e.key === "Escape") {
+        // Innermost thing first: the popup, then the list.
+        if (popupRef.current) popupRef.current.remove();
+        else if (listOpenRef.current) setListOpen(false);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [promptOpen]);
 
   // ---------------------------------------------------------------------
   // Back to my area: keep the control's bbox ref current, and add/remove
@@ -471,17 +748,18 @@ export function MapHome() {
     backToAreaBboxRef.current = bbox;
 
     if (bbox && !backToAreaControlRef.current) {
-      const control = new BackToAreaControl(backToAreaBboxRef);
+      const control = new BackToAreaControl(backToAreaBboxRef, pushHistoryCheckpoint);
       backToAreaControlRef.current = control;
       map.addControl(control, "bottom-right");
     } else if (!bbox && backToAreaControlRef.current) {
       map.removeControl(backToAreaControlRef.current);
       backToAreaControlRef.current = null;
     }
-  }, [savedLocation, loaded]);
+  }, [savedLocation, loaded, pushHistoryCheckpoint]);
 
   // ---------------------------------------------------------------------
-  // Filters (category/service/reports/approximate) -> layer filters.
+  // Filters (category/service/reports/approximate) -> layer filters, the
+  // URL, and the viewport list, all of which are derived from them.
   // ---------------------------------------------------------------------
   useEffect(() => {
     const map = mapRef.current;
@@ -494,7 +772,16 @@ export function MapHome() {
         map.setFilter(layerId, filterExpr);
       }
     }
-  }, [filters, loaded]);
+    writeUrl();
+    // setFilter repaints asynchronously, so read the result once the map has
+    // caught up rather than listing the pre-filter features.
+    if (listOpenRef.current) map.once("idle", rebuildList);
+  }, [filters, loaded, writeUrl, rebuildList]);
+
+  // Build the list the moment the panel opens, not only on the next pan.
+  useEffect(() => {
+    if (listOpen && loaded) rebuildList();
+  }, [listOpen, loaded, rebuildList]);
 
   async function refreshUserOffices(map: MapLibreMap) {
     const bounds = map.getBounds();
@@ -563,6 +850,12 @@ export function MapHome() {
     return { node, link };
   }
 
+  /**
+   * Also records the open pin in `focusRef` so the URL can carry it — that
+   * is what makes a search result, or a clicked pin, a linkable thing
+   * rather than just a view. Cleared on close, including maplibre's own
+   * close button and the Escape shortcut.
+   */
   function openPopup(
     map: MapLibreMap,
     coords: [number, number],
@@ -576,13 +869,23 @@ export function MapHome() {
 
     const { node, link } = buildPopupNode(name, category, officeId);
 
+    focusRef.current = officeId ? { id: officeId, name, category } : null;
+
     if (maplibregl) {
-      popupRef.current = new maplibregl.Popup({ closeButton: true, maxWidth: "260px" })
+      const popup = new maplibregl.Popup({ closeButton: true, maxWidth: "260px" })
         .setLngLat(coords)
         .setDOMContent(node)
         .addTo(map);
+      popup.on("close", () => {
+        if (popupRef.current !== popup) return; // already superseded
+        popupRef.current = null;
+        focusRef.current = null;
+        writeUrl();
+      });
+      popupRef.current = popup;
     }
 
+    writeUrl();
     return { token, link };
   }
 
@@ -597,6 +900,43 @@ export function MapHome() {
     }
   }
 
+  /**
+   * Opens a pin's popup, resolving the app's office id from `osm_uid` when
+   * the feature came out of the tiles rather than the user-added source.
+   * Shared by the map click handler and the results list.
+   */
+  function openOfficePopup(
+    map: MapLibreMap,
+    coords: [number, number],
+    name: string,
+    category: OfficeCategory,
+    officeId: string | null,
+    osmUid: number | null
+  ) {
+    if (officeId) {
+      openPopup(map, coords, name, category, officeId);
+      return;
+    }
+
+    const { token, link } = openPopup(map, coords, name, category, null);
+    if (osmUid === null) {
+      link.textContent = strings.map.officeUnavailable;
+      return;
+    }
+    void resolveOsmUid(osmUid).then((resolvedId) => {
+      if (popupTokenRef.current !== token) return; // superseded by a newer popup
+      if (resolvedId) {
+        link.href = `/office/${resolvedId}`;
+        link.textContent = strings.map.viewOffice;
+        // Only now is there something to put in the URL for this pin.
+        focusRef.current = { id: resolvedId, name, category };
+        writeUrl();
+      } else {
+        link.textContent = strings.map.officeUnavailable;
+      }
+    });
+  }
+
   function handleFeatureClick(map: MapLibreMap, e: MapLayerMouseEvent) {
     const feature = e.features?.[0];
     if (!feature || feature.geometry.type !== "Point") return;
@@ -604,75 +944,50 @@ export function MapHome() {
     const props = (feature.properties ?? {}) as Record<string, unknown>;
     const category = ((props.category as string) ?? "other") as OfficeCategory;
     const name = (props.name as string) ?? "";
+    const osmUidRaw = Number(props.osm_uid);
 
-    if (typeof props.id === "string") {
-      openPopup(map, coords, name, category, props.id);
-      return;
-    }
-
-    const osmUid = Number(props.osm_uid);
-    const { token, link } = openPopup(map, coords, name, category, null);
-    if (!Number.isFinite(osmUid)) {
-      link.textContent = strings.map.officeUnavailable;
-      return;
-    }
-    resolveOsmUid(osmUid).then((officeId) => {
-      if (popupTokenRef.current !== token) return; // superseded by a newer popup
-      if (officeId) {
-        link.href = `/office/${officeId}`;
-        link.textContent = strings.map.viewOffice;
-      } else {
-        link.textContent = strings.map.officeUnavailable;
-      }
-    });
+    openOfficePopup(
+      map,
+      coords,
+      name,
+      category,
+      typeof props.id === "string" ? props.id : null,
+      Number.isFinite(osmUidRaw) ? osmUidRaw : null
+    );
   }
 
-  /**
-   * Whether the URL is driving the initial view. Guards against absent
-   * params before Number(): Number(null) is 0, not NaN, so a bare "/" would
-   * otherwise jump to [0,0] at zoom 0 and open an empty popup over the Gulf
-   * of Guinea.
-   *
-   * Shared by focusFromQueryParams and the saved-area logic so "the URL
-   * wins" is stated once rather than emerging from two separate checks.
-   */
-  function hasFocusQueryParams(): boolean {
+  /** Applies `?lat&lng&zoom` and, if present, reopens `?id`'s popup. */
+  function applyUrlState(map: MapLibreMap) {
     const params = new URLSearchParams(window.location.search);
-    const latRaw = params.get("lat");
-    const lngRaw = params.get("lng");
-    if (latRaw === null || lngRaw === null) return false;
-    return Number.isFinite(Number(latRaw)) && Number.isFinite(Number(lngRaw));
+    const view = parseMapView(params);
+    if (!view) return;
+
+    map.jumpTo({ center: [view.lng, view.lat], zoom: view.zoom });
+
+    const focus = parseMapFocus(params);
+    if (focus) openPopup(map, [view.lng, view.lat], focus.name, focus.category, focus.id);
   }
 
-  function focusFromQueryParams(map: MapLibreMap) {
-    if (!hasFocusQueryParams()) return;
-
-    const params = new URLSearchParams(window.location.search);
-    const lat = Number(params.get("lat"));
-    const lng = Number(params.get("lng"));
-
-    const zoomRaw = params.get("zoom");
-    const zoomParam = zoomRaw === null ? NaN : Number(zoomRaw);
-    const name = params.get("name") ?? "";
-    const category = (params.get("category") as OfficeCategory | null) ?? "other";
-    const id = params.get("id");
-
-    map.jumpTo({ center: [lng, lat], zoom: Number.isFinite(zoomParam) ? zoomParam : 15 });
-    openPopup(map, [lng, lat], name, category, id);
-  }
-
-  function handleSearchSelect(result: OfficeSearchResult) {
+  function handleSearchSelectOffice(result: OfficeSearchResult) {
     const map = mapRef.current;
     if (!map) return;
+    pushHistoryCheckpoint();
     map.flyTo({ center: [result.lng, result.lat], zoom: 16 });
     openPopup(map, [result.lng, result.lat], result.name, result.category, result.id);
   }
 
+  /**
+   * Selecting a place from the search box does the same thing as choosing
+   * one in the first-visit prompt: it becomes the saved area. That is what
+   * makes "back to my area" and the location chip follow the search rather
+   * than lagging a visit behind it.
+   */
   function handleLocationSelect(place: GeocodePlace) {
     const location = savedLocationFromPlace(place);
     writeSavedLocation(location);
     setSavedLocation(location);
     setPromptOpen(false);
+    pushHistoryCheckpoint();
     // fitBounds fires `moveend`, which the debounced handler above already
     // turns into a refreshUserOffices call for the new viewport — no extra
     // fetch wiring needed here.
@@ -688,6 +1003,37 @@ export function MapHome() {
     setSavedLocation(location);
     setPromptOpen(false);
   }
+
+  function handleListSelect(office: VisibleOffice) {
+    const map = mapRef.current;
+    if (!map) return;
+    highlightOffice(null);
+    pushHistoryCheckpoint();
+    // Never zooms *out* — the row was picked off the current view, so
+    // pulling back would lose the context it was chosen in.
+    map.flyTo({ center: [office.lng, office.lat], zoom: Math.max(map.getZoom(), 15) });
+    openOfficePopup(map, [office.lng, office.lat], office.name, office.category, office.id, office.osmUid);
+  }
+
+  function highlightOffice(office: VisibleOffice | null) {
+    const map = mapRef.current;
+    const maplibregl = maplibreRef.current;
+    if (!map || !maplibregl) return;
+
+    if (!office) {
+      highlightMarkerRef.current?.remove();
+      highlightMarkerRef.current = null;
+      return;
+    }
+
+    if (!highlightMarkerRef.current) {
+      highlightMarkerRef.current = new maplibregl.Marker({ element: buildHighlightElement() });
+    }
+    highlightMarkerRef.current.setLngLat([office.lng, office.lat]).addTo(map);
+  }
+
+  const chromePillClass =
+    "pointer-events-auto shrink-0 inline-flex items-center gap-1.5 rounded-full border border-black/10 dark:border-white/20 bg-white/95 dark:bg-black/70 px-3 py-2 text-sm font-medium shadow-sm hover:bg-black/5 dark:hover:bg-white/10";
 
   return (
     <div className="relative w-full h-dvh overflow-hidden">
@@ -722,8 +1068,22 @@ export function MapHome() {
             name={savedLocation?.kind === "place" ? savedLocation.name : null}
             onClick={() => setPromptOpen(true)}
           />
-          <OfficeSearchBox onSelect={handleSearchSelect} />
-          <MapFilterPanel filters={filters} onChange={setFilters} />
+          <OfficeSearchBox
+            inputRef={searchInputRef}
+            onSelectOffice={handleSearchSelectOffice}
+            onSelectPlace={handleLocationSelect}
+          />
+          <div className="flex items-center gap-2">
+            <MapFilterPanel filters={filters} onChange={setFilters} />
+            <button
+              type="button"
+              aria-pressed={listOpen}
+              onClick={() => setListOpen((open) => !open)}
+              className={chromePillClass}
+            >
+              {strings.map.list.open}
+            </button>
+          </div>
         </div>
         <Link
           href="/add-office"
@@ -732,6 +1092,21 @@ export function MapHome() {
           {strings.map.addMissingOffice}
         </Link>
       </div>
+
+      <OfficeListPanel
+        open={listOpen}
+        offices={visibleOffices}
+        belowMinZoom={belowOfficeZoom}
+        truncated={listTruncated}
+        staleArea={listStale}
+        onSearchThisArea={rebuildList}
+        onSelect={handleListSelect}
+        onHighlight={highlightOffice}
+        onClose={() => {
+          highlightOffice(null);
+          setListOpen(false);
+        }}
+      />
 
       {promptOpen ? (
         <LocationPrompt onSelect={handleLocationSelect} onSkip={handleLocationSkip} />

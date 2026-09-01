@@ -125,9 +125,21 @@ export const strings = {
   },
   map: {
     title: "Map",
-    searchPlaceholder: "Search offices by name…",
-    searchNoResults: "No offices found.",
+    // The box searches places (Nominatim, via /api/geocode) and offices
+    // (/api/offices/search) together, so the placeholder has to promise both
+    // — "Search offices by name" sent people to the location chip for a city.
+    searchPlaceholder: "Search a place or office…",
+    searchAriaLabel: "Search places and offices",
+    searchNoResults: "Nothing found.",
     searchLoading: "Searching…",
+    searchClear: "Clear search",
+    // Group headings in the results list. Places come first: a place answers
+    // "take me there", which is the more common intent from a cold start.
+    searchPlacesHeading: "Places",
+    searchOfficesHeading: "Offices",
+    searchRecentHeading: "Recent",
+    // Shown under the box while it is empty and focused with no history.
+    searchShortcutHint: "Press / to search",
     legendTitle: "Categories",
     addMissingOffice: "Add missing office",
     viewOffice: "View office →",
@@ -185,13 +197,30 @@ export const strings = {
       reset: "Reset filters",
       activeCount: (n: number) => (n === 1 ? "1 filter" : `${n} filters`),
     },
+    // Titles/aria-labels for maplibre's own control buttons, applied in
+    // MapHome so the map speaks the same English as the rest of the chrome
+    // (maplibre's defaults are close but not identical) and so the keyboard
+    // shortcuts are discoverable from the buttons themselves.
     controls: {
       geolocate: "Show my location",
       fullscreen: "Toggle fullscreen",
-      zoomIn: "Zoom in",
-      zoomOut: "Zoom out",
+      zoomIn: "Zoom in (+)",
+      zoomOut: "Zoom out (-)",
       resetNorth: "Reset bearing to north",
       backToArea: "Back to my area",
+    },
+    // The viewport results list — the "what is on screen right now" panel.
+    list: {
+      open: "List",
+      close: "Close list",
+      heading: "Offices in view",
+      empty: "No offices in this view. Pan the map or widen your filters.",
+      // maplibre only knows about features it has actually drawn, so the
+      // list is capped by what is rendered rather than by a query limit.
+      count: (n: number) => (n === 1 ? "1 office" : `${n} offices`),
+      truncated: (n: number) => `Showing the nearest ${n}`,
+      // Google-Maps-style: panning does not refetch on its own, it offers.
+      searchThisArea: "Search this area",
     },
     errors: {
       invalidBbox: "Invalid map area.",
