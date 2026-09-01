@@ -86,14 +86,16 @@ jobs:
             exit 1
           fi
 
-      # Must be the SESSION pooler (port 5432), not the transaction pooler
-      # (6543) the app itself uses: drizzle-kit takes an advisory lock and
-      # runs DDL, neither of which survives transaction-mode pooling.
-      # Remember to URL-encode the `@` in the password as %40.
+      # scripts/migrate.mjs rather than `npm run db:migrate`: drizzle-kit
+      # exits 1 with no message when a connection or statement fails, which
+      # is exactly what happened on the first attempt here. The script runs
+      # the same migrations through drizzle-orm and prints the real error,
+      # plus a named check for the most likely misconfiguration — the
+      # transaction pooler (6543) instead of the session pooler (5432).
       - name: Apply migrations
         env:
           DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
-        run: npm run db:migrate
+        run: node scripts/migrate.mjs
 
   deploy:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
