@@ -1,4 +1,12 @@
-name: CI
+# Tests, then migrations, then deploy — in that order, on every push to main.
+#
+# Vercel's own Git auto-deploy for `main` is switched off in web/vercel.json.
+# That is deliberate: Vercel starts building the moment you push, which would
+# race the migration job here and could put schema-dependent code live before
+# the columns it reads exist. Turning it off makes this workflow the single
+# path to production, so "migrate, then deploy" is guaranteed rather than
+# merely likely. Preview deployments for branches and PRs are untouched.
+name: CI & Deploy
 
 on:
   push:
@@ -33,3 +41,101 @@ jobs:
 
       - name: Test
         run: npm test
+
+  migrate:
+    # Only real pushes to main touch production; PRs stop at build-and-test.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    # Shared with `deploy` so two rapid pushes can never interleave a
+    # migration with someone else's deploy. Never cancel in progress: a
+    # half-applied migration is worse than a slow queue.
+    concurrency:
+      group: production-pipeline
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Secrets can't be read in a job-level `if:`, so the guard is a step —
+      # same shape as the APP_URL check in jobs.yml.
+      - name: Check for PROD_DATABASE_URL
+        env:
+          PROD_DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+        run: |
+          if [ -z "$PROD_DATABASE_URL" ]; then
+            echo "::error::PROD_DATABASE_URL secret is not set — migrations were NOT applied and nothing will deploy."
+            exit 1
+          fi
+
+      # Must be the SESSION pooler (port 5432), not the transaction pooler
+      # (6543) the app itself uses: drizzle-kit takes an advisory lock and
+      # runs DDL, neither of which survives transaction-mode pooling.
+      # Remember to URL-encode the `@` in the password as %40.
+      - name: Apply migrations
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+        run: npm run db:migrate
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: migrate
+    runs-on: ubuntu-latest
+    concurrency:
+      group: production-pipeline
+      cancel-in-progress: false
+    # No working-directory here, unlike the jobs above: Vercel applies the
+    # project's own Root Directory setting ("web") to whatever it is given, so
+    # the CLI has to run from the repo root or it would look for web/web.
+    # Hardcoded rather than read from repo variables: these are identifiers,
+    # not credentials. On their own they grant nothing — every Vercel API
+    # call still needs VERCEL_TOKEN — so keeping them here means the only
+    # things that have to be configured by hand are the two real secrets.
+    env:
+      VERCEL_ORG_ID: team_RpYGYegyhsnvamfo5lLSjmWv
+      VERCEL_PROJECT_ID: prj_6QFpAyFJsSntCMq6hPaYBIXL9Xzq
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Only needed to run the Vercel CLI — the app itself is built on
+      # Vercel (see the deploy step), not here.
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check for VERCEL_TOKEN
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          if [ -z "$VERCEL_TOKEN" ]; then
+            echo "::error::VERCEL_TOKEN secret is not set — migrations ran but nothing deployed. Vercel git auto-deploy is off (web/vercel.json), so production is unchanged."
+            exit 1
+          fi
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      # Source upload, deliberately NOT `vercel build --prebuilt`.
+      # DATABASE_URL and SESSION_SECRET are stored as *sensitive* env vars,
+      # which `vercel pull` returns as the literal "[SENSITIVE]" — and
+      # src/lib/env.ts validates both at import time, so a build here would
+      # fail on a bad DATABASE_URL. Building on Vercel lets the platform
+      # inject the real values. The repo-root .vercelignore is what keeps
+      # pipeline/ out of the upload.
+      - name: Deploy to production
+        run: vercel deploy --prod --yes --token=${{ secrets.VERCEL_TOKEN }}
