@@ -294,9 +294,9 @@ export function ReportForm() {
 
         {phase === "no-office" && (
           <p className="text-black/70 dark:text-white/70">
-            Pick an office from the map first, then come back here to report.{" "}
+            {strings.report.noOffice.body}{" "}
             <Link href="/" className="underline">
-              Go to the map
+              {strings.report.noOffice.link}
             </Link>
           </p>
         )}

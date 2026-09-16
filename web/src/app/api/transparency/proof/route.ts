@@ -41,6 +41,7 @@ export async function GET(request: NextRequest) {
         narrative: complaints.narrative,
         consentTier: complaints.consentTier,
         publicMonth: complaints.publicMonth,
+        status: complaints.status,
       })
       .from(complaints)
       .where(eq(complaints.id, complaintId))
@@ -69,6 +70,10 @@ export async function GET(request: NextRequest) {
 
     const checkpointRows = await db
       .select({
+        // fromSeq is part of the signed payload (`fromSeq:toSeq:headHash`,
+        // see checkpointPayload in src/lib/signing.ts), so the client cannot
+        // check the signature without it.
+        fromSeq: chainCheckpoints.fromSeq,
         toSeq: chainCheckpoints.toSeq,
         headHash: chainCheckpoints.headHash,
         signature: chainCheckpoints.signature,
@@ -105,25 +110,39 @@ export async function GET(request: NextRequest) {
       chainSlice = [entry];
     }
 
-    // Reports submitted under the "escalate_only" consent tier are never
-    // meant to reach public view — withhold the field content (narrative
-    // etc.) that recomputing the hash would otherwise require exposing.
-    // The hash/chain-linkage proof (seq, entryHash, prevHash, chainSlice)
-    // is still returned, so the *fact* that a report exists and where it
-    // sits in the chain remains independently verifiable either way.
-    const canonicalFields: ChainComplaintFields | null =
-      complaint.consentTier === "escalate_only"
-        ? null
-        : {
-            id: complaint.id,
-            officeId: complaint.officeId,
-            serviceType: complaint.serviceType,
-            bribeAmount: complaint.bribeAmount,
-            designation: complaint.designation,
-            narrative: complaint.narrative,
-            consentTier: complaint.consentTier,
-            publicMonth: complaint.publicMonth,
-          };
+    // Field content is withheld in three cases:
+    //
+    //  - consent tier "escalate_only" — never meant to reach public view.
+    //  - status "tombstoned" — removing the content IS the tombstone (see
+    //    tombstoneEntry in src/lib/chain.ts); serving it back here would
+    //    undo a removal that may well have been a legal order.
+    //  - status "rejected" — refused in moderation, so it was never public.
+    //
+    // "pending" deliberately still discloses: every report is pending the
+    // moment it is filed, and the success screen tells the reporter they can
+    // verify it on /transparency with the reference id they were just given.
+    //
+    // The hash/chain-linkage proof (seq, entryHash, prevHash, chainSlice) is
+    // returned either way, so the *fact* that a report exists and where it
+    // sits in the chain stays independently verifiable even when its content
+    // is withheld.
+    const withholdContent =
+      complaint.consentTier === "escalate_only" ||
+      complaint.status === "tombstoned" ||
+      complaint.status === "rejected";
+
+    const canonicalFields: ChainComplaintFields | null = withholdContent
+      ? null
+      : {
+          id: complaint.id,
+          officeId: complaint.officeId,
+          serviceType: complaint.serviceType,
+          bribeAmount: complaint.bribeAmount,
+          designation: complaint.designation,
+          narrative: complaint.narrative,
+          consentTier: complaint.consentTier,
+          publicMonth: complaint.publicMonth,
+        };
 
     return NextResponse.json({
       seq: entry.seq,
@@ -133,6 +152,7 @@ export async function GET(request: NextRequest) {
       canonicalFields,
       nearestCheckpoint: nearestCheckpoint
         ? {
+            fromSeq: nearestCheckpoint.fromSeq,
             toSeq: nearestCheckpoint.toSeq,
             headHash: nearestCheckpoint.headHash,
             signature: nearestCheckpoint.signature,

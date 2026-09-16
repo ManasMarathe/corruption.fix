@@ -41,7 +41,13 @@ COMMENT ON ROLE cf_app IS
   'no grants at all on the identity_vault schema — cannot read reporter_identities '
   'or vault_access_log, even indirectly, since it lacks USAGE on the schema.';
 
-GRANT CONNECT ON DATABASE current_database() TO cf_app;
+-- GRANT ... ON DATABASE takes a literal identifier, never an expression, so
+-- `ON DATABASE current_database()` is a plain syntax error and aborts the
+-- whole script. Build the statement as text and let psql run it, which keeps
+-- this file database-name-agnostic. (\gexec is why the header insists on
+-- `psql -f`; it is not available to other SQL clients.)
+SELECT format('GRANT CONNECT ON DATABASE %I TO cf_app', current_database())
+\gexec
 GRANT USAGE ON SCHEMA public TO cf_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO cf_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO cf_app;
@@ -62,7 +68,8 @@ COMMENT ON ROLE cf_vault IS
   'path (a separate DB connection/credential from the main app pool in '
   'production). Full CRUD on identity_vault.* only.';
 
-GRANT CONNECT ON DATABASE current_database() TO cf_vault;
+SELECT format('GRANT CONNECT ON DATABASE %I TO cf_vault', current_database())
+\gexec
 GRANT USAGE ON SCHEMA identity_vault TO cf_vault;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA identity_vault TO cf_vault;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA identity_vault TO cf_vault;

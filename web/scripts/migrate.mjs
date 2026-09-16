@@ -34,7 +34,7 @@ try {
 }
 
 const port = parsed.port || "5432";
-console.log(`Connecting on port ${port}.`);
+console.log(`Connecting to ${parsed.hostname} on port ${port}.`);
 
 // Supabase's transaction pooler multiplexes many clients over few server
 // connections, so it cannot hold the session-scoped advisory lock or the
@@ -49,6 +49,25 @@ if (port === "6543") {
   process.exit(1);
 }
 
+// The other Supabase trap, and the one the port check above cannot see: a
+// direct-connection host (db.<ref>.supabase.co) is on port 5432 too, exactly
+// like the session pooler, so the URL looks correct. But Supabase's direct
+// connections have been IPv6-only since 2024, and GitHub Actions runners
+// have no IPv6 route — the job fails with ENETUNREACH against an IPv6
+// literal after appearing to start normally. The pooler hostname is
+// dual-stack and works from anywhere.
+if (/^db\.[a-z0-9]+\.supabase\.co$/i.test(parsed.hostname)) {
+  console.error(
+    `${parsed.hostname} is Supabase's DIRECT connection host, which is ` +
+      "IPv6-only. GitHub Actions runners have no IPv6 connectivity, so this " +
+      "will fail with ENETUNREACH even though the port (5432) is right.\n" +
+      "Use the session pooler host instead — it is also on 5432 and looks " +
+      "like aws-0-<region>.pooler.supabase.com. Copy it from the project " +
+      "dashboard under Connect -> Session pooler."
+  );
+  process.exit(1);
+}
+
 const sql = postgres(url, { max: 1, onnotice: () => {} });
 
 try {
@@ -59,6 +78,19 @@ try {
   console.log("Migrations applied.");
 } catch (error) {
   console.error(`Migration failed: ${error?.message ?? error}`);
+  // Catches the same IPv6 problem when it arrives via a hostname the check
+  // above does not recognise (a custom domain, a CNAME, a non-Supabase host).
+  if (
+    (error?.code === "ENETUNREACH" || error?.code === "EHOSTUNREACH") &&
+    /:[0-9a-f]*:/i.test(String(error?.message ?? ""))
+  ) {
+    console.error(
+      "  -> That address is IPv6. This runner has no IPv6 route, so the " +
+        "host has to resolve to IPv4 — on Supabase that means the session " +
+        "pooler (aws-0-<region>.pooler.supabase.com:5432), not the direct " +
+        "db.<ref>.supabase.co host."
+    );
+  }
   // Postgres errors carry the useful detail off to the side of `message`.
   for (const field of ["code", "detail", "hint", "where", "severity"]) {
     if (error?.[field]) console.error(`  ${field}: ${error[field]}`);

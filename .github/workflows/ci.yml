@@ -25,27 +25,65 @@ jobs:
 
       # Node 24, matching the runtime the project is configured for on
       # Vercel. Not a free choice: ai@7 and every @ai-sdk/* package declare
-      # engines.node >=22, and package-lock.json was authored by npm 11 —
-      # the npm 10 that ships with Node 20 fails to resolve tsx nested copy
-      # of esbuild out of it and aborts npm ci with EUSAGE.
+      # engines.node >=22.
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.4.2
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "24"
-          cache: "npm"
-          cache-dependency-path: web/package-lock.json
+          cache: "pnpm"
+          cache-dependency-path: web/pnpm-lock.yaml
 
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Lint
-        run: npm run lint
+        run: pnpm lint
 
       - name: Typecheck
-        run: npm run typecheck
+        run: pnpm typecheck
 
       - name: Test
-        run: npm test
+        run: pnpm test
+
+  # pipeline/ has its own `node --test` suite (lib/*.test.mjs,
+  # 05-sources/*.test.mjs) covering the OSM tag mapping, the osm_uid
+  # convention, and each government-dataset normalizer — all of which the web
+  # app depends on for tile/DB consistency. Nothing ran it until now. It is a
+  # separate job rather than a step in build-and-test because it has its own
+  # lockfile and working directory, and it deliberately does NOT gate the
+  # deploy: the pipeline is operator-run tooling, not part of the deployed
+  # artifact.
+  pipeline-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pipeline
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.4.2
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "pnpm"
+          cache-dependency-path: pipeline/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test
+        run: pnpm test
 
   migrate:
     # Only real pushes to main touch production; PRs stop at build-and-test.
@@ -65,15 +103,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.4.2
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "24"
-          cache: "npm"
-          cache-dependency-path: web/package-lock.json
+          cache: "pnpm"
+          cache-dependency-path: web/pnpm-lock.yaml
 
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       # Secrets can't be read in a job-level `if:`, so the guard is a step —
       # same shape as the APP_URL check in jobs.yml.
@@ -86,7 +129,7 @@ jobs:
             exit 1
           fi
 
-      # scripts/migrate.mjs rather than `npm run db:migrate`: drizzle-kit
+      # scripts/migrate.mjs rather than `pnpm db:migrate`: drizzle-kit
       # exits 1 with no message when a connection or statement fails, which
       # is exactly what happened on the first attempt here. The script runs
       # the same migrations through drizzle-orm and prints the real error,
@@ -120,10 +163,15 @@ jobs:
 
       # Only needed to run the Vercel CLI — the app itself is built on
       # Vercel (see the deploy step), not here.
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.4.2
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Check for VERCEL_TOKEN
         env:
@@ -134,9 +182,6 @@ jobs:
             exit 1
           fi
 
-      - name: Install Vercel CLI
-        run: npm install --global vercel@latest
-
       # Source upload, deliberately NOT `vercel build --prebuilt`.
       # DATABASE_URL and SESSION_SECRET are stored as *sensitive* env vars,
       # which `vercel pull` returns as the literal "[SENSITIVE]" — and
@@ -145,4 +190,4 @@ jobs:
       # inject the real values. The repo-root .vercelignore is what keeps
       # pipeline/ out of the upload.
       - name: Deploy to production
-        run: vercel deploy --prod --yes --token=${{ secrets.VERCEL_TOKEN }}
+        run: pnpm dlx vercel@latest deploy --prod --yes --token=${{ secrets.VERCEL_TOKEN }}

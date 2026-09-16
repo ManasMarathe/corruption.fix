@@ -13,7 +13,6 @@ import type {
   Popup as MapLibrePopup,
   SymbolLayerSpecification,
 } from "maplibre-gl";
-import type { DataDrivenPropertyValueSpecification } from "@maplibre/maplibre-gl-style-spec";
 import type { OfficeCategory } from "@/db/schema";
 import { CATEGORY_COLORS, categoryColorExpression } from "@/lib/categories";
 import { haversineKm } from "@/lib/distance";
@@ -45,6 +44,15 @@ import { OfficeSearchBox, type OfficeSearchResult } from "./OfficeSearchBox";
 // pass. A plain `typeof import(...)` type reference is compile-time only
 // and safe to use anywhere.
 type MaplibreModule = typeof import("maplibre-gl");
+
+// The paint block of a circle layer, as maplibre types it. Each expression
+// below is cast to the exact property it feeds rather than to a shared
+// DataDrivenPropertyValueSpecification<T>: that type lives in
+// @maplibre/maplibre-gl-style-spec, which maplibre-gl depends on but does not
+// re-export, so importing it directly only ever worked by reaching through
+// npm's hoisted node_modules for a package this app never declared. Under
+// pnpm's strict layout it resolves to nothing and the build fails.
+type CirclePaint = NonNullable<CircleLayerSpecification["paint"]>;
 
 const OSM_SOURCE_ID = "offices";
 const OSM_SOURCE_LAYER = "offices";
@@ -191,9 +199,13 @@ function buildFilterExpression(filters: MapFilters): unknown[] {
   }
 
   if (filters.withReportsOnly) {
-    // Defensive: a feature with no `has_reports` property coalesces to
-    // false and is excluded, rather than erroring.
-    parts.push(["==", ["coalesce", ["get", "has_reports"], false], true]);
+    // `to-number` rather than `== true`: the tile build writes has_reports
+    // as the number 1 (see pipeline/lib/prepare-tiles-geojson.mjs), and
+    // MapLibre's `==` is strictly typed — `["==", 1, true]` is false, so a
+    // boolean comparison here silently matched nothing at all. to-number
+    // maps 1 -> 1, true -> 1, and an absent property (coalesced to 0) -> 0,
+    // so the filter is correct whichever of the two the tiles carry.
+    parts.push([">", ["to-number", ["coalesce", ["get", "has_reports"], 0]], 0]);
   }
 
   // Features with no `precision` property are exact locations and must
@@ -469,7 +481,7 @@ export function MapHome() {
           data: { type: "FeatureCollection", features: [] },
         });
 
-        const circleColor = categoryColorExpression() as DataDrivenPropertyValueSpecification<string>;
+        const circleColor = categoryColorExpression() as CirclePaint["circle-color"];
 
         // Approximate (pincode-centroid) offices render as a hollow ring —
         // opacity 0 fill, visible stroke in the category color instead of
@@ -483,19 +495,19 @@ export function MapHome() {
           isApproximate,
           0,
           1,
-        ] as unknown as DataDrivenPropertyValueSpecification<number>;
+        ] as unknown as CirclePaint["circle-opacity"];
         const circleStrokeWidth = [
           "case",
           isApproximate,
           2,
           1,
-        ] as unknown as DataDrivenPropertyValueSpecification<number>;
+        ] as unknown as CirclePaint["circle-stroke-width"];
         const circleStrokeColor = [
           "case",
           isApproximate,
           circleColor,
           "#ffffff",
-        ] as unknown as DataDrivenPropertyValueSpecification<string>;
+        ] as unknown as CirclePaint["circle-stroke-color"];
         // User-added offices keep their own (darker) default stroke color
         // when not approximate — their width was already 2 either way, so
         // only the color needs a `case`.
@@ -504,7 +516,7 @@ export function MapHome() {
           isApproximate,
           circleColor,
           "#111827",
-        ] as unknown as DataDrivenPropertyValueSpecification<string>;
+        ] as unknown as CirclePaint["circle-stroke-color"];
 
         const officeCircleLayer: CircleLayerSpecification = {
           id: OSM_CIRCLE_LAYER,

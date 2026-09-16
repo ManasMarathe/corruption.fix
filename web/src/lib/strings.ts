@@ -43,6 +43,12 @@ export const strings = {
     nav: {
       back: "Back",
     },
+    // Shown when /report is opened without an ?office= param — previously
+    // the only user-facing copy in the app inlined at its call site.
+    noOffice: {
+      body: "Pick an office from the map first, then come back here to report.",
+      link: "Go to the map",
+    },
     auth: {
       heading: "Verify your email to continue",
       body: "We use a one-time code to confirm you're a real person and to let you follow up on this report later. We never publish your email address.",
@@ -385,10 +391,23 @@ export const strings = {
       inputPlaceholder: "e.g. 018f2e2a-...",
       buttonLabel: "Verify",
       verifying: "Verifying…",
-      pass: "Verified — this entry's hash and its position in the signed chain check out.",
+      pass: "Verified — this entry's hash matches its contents, it links to a signed checkpoint, and that checkpoint's signature is valid.",
+      // Distinct from `pass` on purpose: the chain and the checkpoint head
+      // both check out, but the signature could not be tested — either this
+      // browser lacks Ed25519 in Web Crypto or no public key is published.
+      // Reporting that as a full pass would claim a guarantee nobody made.
+      passUnverifiedSignature:
+        "This entry's hash matches its contents and links to a checkpoint, but the checkpoint's signature couldn't be checked in this browser.",
+      // Accurate about its own scope: with no checkpoint covering the entry,
+      // the proof carries only the entry itself, so there is nothing to walk
+      // back to genesis.
       passUnanchored:
-        "This entry's hash chains back to genesis correctly, but no signed checkpoint covers it yet.",
+        "This entry's hash matches its contents. No signed checkpoint covers it yet, so there is nothing to anchor it to.",
       fail: "Verification failed — the recomputed hash doesn't match. This should never happen; please report it.",
+      // A hash mismatch is most likely a bug; a bad signature on a
+      // well-formed chain is not, so it gets its own, blunter wording.
+      failSignature:
+        "Verification failed — this checkpoint is not validly signed by the published key. Please report it.",
       notFound: "No report found with that reference ID.",
       error: "Couldn't fetch or verify that report right now.",
     },

@@ -1,0 +1,14 @@
+allowBuilds:
+  esbuild: true
+  unrs-resolver: true
+# pnpm settings for this project. Lives here rather than under a "pnpm" key in
+# package.json because pnpm 11+ no longer reads that key (it warns and ignores
+# it). There is no `packages:` list on purpose — web/ is a single project, not
+# a monorepo; this file exists only to carry the setting below.
+
+# Dependencies allowed to run install scripts. pnpm blocks postinstall by
+# default, and without these two `pnpm install` exits ERR_PNPM_IGNORED_BUILDS
+# with a toolchain that looks installed but cannot run:
+#   esbuild        — the bundler behind vitest and drizzle-kit; its postinstall
+#                    links the platform binary.
+#   unrs-resolver  — native resolver used by eslint-config-next's import plugin.

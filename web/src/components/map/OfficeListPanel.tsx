@@ -6,10 +6,11 @@ import { strings } from "@/lib/strings";
 import type { OfficeCategory } from "@/db/schema";
 
 /**
- * One row of the viewport list. `id` is the app's office uuid when known;
- * pmtiles features only carry `osm_uid` until /api/offices/lookup resolves
- * them, which is why selecting a row goes back through MapHome's existing
- * popup path rather than linking straight to /office/[id].
+ * One row of the viewport list. `id` is the app's office uuid when known.
+ * Tiles built by pipeline/04-tiles.sh now carry it directly, but tiles built
+ * before that change carry only `osm_uid` and need /api/offices/lookup to
+ * resolve it — which is why selecting a row goes back through MapHome's
+ * existing popup path rather than linking straight to /office/[id].
  */
 export interface VisibleOffice {
   /** Stable list key: the office uuid, or `osm:<uid>` for an unresolved pin. */

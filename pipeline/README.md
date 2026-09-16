@@ -13,21 +13,21 @@ and does not touch `web/` except for one write: `web/public/tiles/offices.pmtile
 brew install osmium-tool tippecanoe   # OSM filtering/export + tile builder
 # Postgres 16 + PostGIS, with DATABASE_URL from web/.env.local reachable,
 # and the `offices` table migrated — both handled outside this pipeline.
-cd pipeline && npm install
+cd pipeline && pnpm install
 ```
 
 ## Steps
 
-Run individually or all at once with `npm run all`.
+Run individually or all at once with `pnpm all`.
 
 | step | script | what it does | expected time / size |
 |---|---|---|---|
-| 1 | `npm run download` (`01-download.sh`) | Downloads `data/india-latest.osm.pbf` from Geofabrik (resumable via `curl -C -`); generates `data/states.json` + `data/districts.csv` (see caveats below) | ~1.4GB, minutes-to-tens-of-minutes depending on bandwidth |
-| 2 | `npm run extract` (`02-extract.sh`) | `osmium tags-filter` down to `amenity=police\|post_office\|courthouse`, `office=government`, then `osmium export` to `data/india-offices.geojsonseq` (point + polygon geometries, `@type`/`@id` attributes attached) | a minute or two |
-| 3 | `npm run import` (`03-import.mjs`) | Streams `states.json`/`districts.csv` then `india-offices.geojsonseq` into Postgres, upserting on `lgd_code` / `osm_id` | a few minutes; batches of 500, progress logged every 10k features |
-| 4 | `npm run tiles` (`04-tiles.sh`) | Runs `lib/prepare-tiles-geojson.mjs` (same tag-mapping as step 3, trimmed to `osm_uid`/`name`/`category`) then `tippecanoe` → `web/public/tiles/offices.pmtiles` | a minute or two; expect ~10-40MB output |
+| 1 | `pnpm download` (`01-download.sh`) | Downloads `data/india-latest.osm.pbf` from Geofabrik (resumable via `curl -C -`); generates `data/states.json` + `data/districts.csv` (see caveats below) | ~1.4GB, minutes-to-tens-of-minutes depending on bandwidth |
+| 2 | `pnpm extract` (`02-extract.sh`) | `osmium tags-filter` down to `amenity=police\|post_office\|courthouse`, `office=government`, then `osmium export` to `data/india-offices.geojsonseq` (point + polygon geometries, `@type`/`@id` attributes attached) | a minute or two |
+| 3 | `pnpm run import` (`03-import.mjs`) | Streams `states.json`/`districts.csv` then `india-offices.geojsonseq` into Postgres, upserting on `lgd_code` / `osm_id` | a few minutes; batches of 500, progress logged every 10k features |
+| 4 | `pnpm tiles` (`04-tiles.sh`) | Runs `lib/prepare-tiles-geojson.mjs` (streams the `offices` table out of Postgres as `id`/`osm_uid`/`name`/`category`/`services`/`precision`/`has_reports`) then `tippecanoe` → `web/public/tiles/offices.pmtiles` | a minute or two; expect ~10-40MB output |
 
-`npm run all` chains all four.
+`pnpm all` chains all four.
 
 ## The `osm_uid` convention
 
@@ -134,12 +134,27 @@ government datasets alongside OSM, instead of relying on OSM alone.
 `/api/offices?bbox=` (the live API route) only ever returns `source='user'`
 rows. **Every other pin on the map — including everything steps 5/6 import —
 is drawn from the static `web/public/tiles/offices.pmtiles` file**, built by
-`04-tiles.sh` from a GeoJSON export of the `offices` table at build time.
-Running `npm run sources` / `npm run merge` only changes rows in Postgres.
-**To make imported offices actually visible, you must re-run `npm run
-tiles` (04-tiles.sh) afterwards and redeploy `offices.pmtiles`.** This is
-easy to forget and produces a confusing "I imported 50k offices but the map
-looks the same" result — don't skip it.
+`04-tiles.sh` from the `offices` table at build time. Running `pnpm
+sources` / `pnpm merge` only changes rows in Postgres. **To make imported
+offices actually visible, you must re-run `pnpm tiles` (04-tiles.sh)
+afterwards and redeploy `offices.pmtiles`.** This is easy to forget and
+produces a confusing "I imported 50k offices but the map looks the same"
+result — don't skip it.
+
+`has_reports` comes from the `office_stats` materialized view, so a tile
+build also wants a recent `refresh-stats` run (`POST /api/jobs/refresh-stats`)
+if the "only offices with reports" filter should reflect recent complaints.
+
+> **Fixed (was silently broken):** `lib/prepare-tiles-geojson.mjs` used to
+> read `data/india-offices.geojsonseq` — the OSM extract — and look each
+> feature up in Postgres by `osm_id` purely to decorate it. Rows with no
+> `osm_id`, which is every row steps 5/6 create (they key on
+> `(source, source_ref)` instead), could therefore never reach the tiles no
+> matter how many times you re-ran step 4, and `location_precision =
+> 'approximate'` had nothing to describe. It now streams the `offices` table
+> itself, so every source reaches the map. Tiles built before this carry no
+> `id` property; the web map falls back to the `osm_uid` lookup for those,
+> so old tiles keep working until you rebuild.
 
 ### Step 5 — `pipeline/05-sources/*.mjs`
 
@@ -176,7 +191,7 @@ Run:
 
 ```
 node 05-sources/indiapost.mjs --smoke-test   # 3 live pincode lookups, prints normalized rows
-npm run sources                              # runs fetchRaw+normalize for all four, writes
+pnpm sources                              # runs fetchRaw+normalize for all four, writes
                                               # data/raw/<source>.canonical.json
 ```
 
@@ -230,7 +245,7 @@ logged at the end of the run rather than guessing a coordinate.
 Run:
 
 ```
-npm run merge   # node 06-merge.mjs
+pnpm merge   # node 06-merge.mjs
 ```
 
 Batched inserts (500/batch), `postgres` + `uuid`'s `v7()` ids, progress

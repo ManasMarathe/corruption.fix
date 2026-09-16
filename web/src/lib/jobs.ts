@@ -9,7 +9,7 @@ import { newId } from "./uuid";
 /**
  * Scheduled maintenance jobs, run via POST /api/jobs/[job] (see
  * src/app/api/jobs/[job]/route.ts) by the GitHub Actions workflow in
- * .github/workflows/jobs.yml on a 30-minute cron, authenticated with a
+ * .github/workflows/jobs.yml on an hourly cron, authenticated with a
  * `Authorization: Bearer <JOB_SECRET>` header.
  */
 

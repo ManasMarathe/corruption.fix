@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ComplaintDraft } from "@/lib/chat-tools";
 import { strings } from "@/lib/strings";
 
@@ -11,6 +11,11 @@ import { strings } from "@/lib/strings";
 // as ReportForm.tsx.
 const CONSENT_TIERS = ["publish_named", "publish_anon", "escalate_only"] as const;
 type ConsentTier = (typeof CONSENT_TIERS)[number];
+
+// /api/auth/request-otp enforces a 60s per-email cooldown (and 5/hour cap).
+// Mirrored here purely for the resend button's countdown display — same
+// value and same reason as ReportForm.tsx.
+const RESEND_COOLDOWN_MS = 60_000;
 
 /**
  * Deterministic hand-off from the AI chat to the real submission path.
@@ -54,6 +59,24 @@ export function DraftReviewCard({ draft }: { draft: ComplaintDraft }) {
   const [code, setCode] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
   const [complaintId, setComplaintId] = useState<string | null>(null);
+  const [resendReadyAt, setResendReadyAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+
+  // Ticks `now` once a second while a resend cooldown is active so the
+  // button can count down, and only while one is active so no timer
+  // outlives its purpose. Same shape as ReportForm.tsx.
+  useEffect(() => {
+    if (resendReadyAt === null) return;
+    const interval = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, [resendReadyAt]);
+
+  useEffect(() => {
+    if (resendReadyAt !== null && now >= resendReadyAt) setResendReadyAt(null);
+  }, [now, resendReadyAt]);
+
+  const resendSecondsRemaining =
+    resendReadyAt === null ? 0 : Math.max(0, Math.ceil((resendReadyAt - now) / 1000));
 
   function handleReviewContinue(e: React.FormEvent) {
     e.preventDefault();
@@ -65,15 +88,31 @@ export function DraftReviewCard({ draft }: { draft: ComplaintDraft }) {
     setPhase("consent");
   }
 
+  // The sole auth gate, run right before submission. Reading
+  // `body.authenticated` off a non-200 response would silently treat a
+  // failed check as "not authenticated" and push an already-verified user
+  // back through the OTP flow, so a non-200 is handled explicitly — same
+  // guard as ReportForm.handleConsentContinue.
   async function handleConsentContinue() {
     setError(null);
+    setAuthBusy(true);
     try {
-      const { body } = await fetchJson<{ authenticated: boolean }>("/api/auth/me");
-      setPhase(body.authenticated ? "submitting" : "auth-request");
-      if (body.authenticated) await submitComplaint();
+      const { status, body } = await fetchJson<{ authenticated?: boolean }>("/api/auth/me");
+      if (status !== 200) {
+        setError(strings.report.errors.serverError);
+        return; // stay on consent
+      }
+      if (body.authenticated) {
+        setPhase("submitting");
+        await submitComplaint();
+        return;
+      }
+      setPhase("auth-request");
     } catch {
       setError(strings.report.errors.serverError);
       setPhase("consent");
+    } finally {
+      setAuthBusy(false);
     }
   }
 
@@ -94,6 +133,7 @@ export function DraftReviewCard({ draft }: { draft: ComplaintDraft }) {
         setError(body.error?.message ?? strings.report.errors.serverError);
         return;
       }
+      setResendReadyAt(Date.now() + RESEND_COOLDOWN_MS);
       setPhase("auth-verify");
     } catch {
       setError(strings.report.errors.serverError);
@@ -298,12 +338,13 @@ export function DraftReviewCard({ draft }: { draft: ComplaintDraft }) {
               onClick={() => setPhase("review")}
               className="rounded border px-4 py-2 text-sm font-medium"
             >
-              Back
+              {strings.report.nav.back}
             </button>
             <button
               type="button"
               onClick={handleConsentContinue}
-              className="flex-1 rounded bg-foreground text-background px-4 py-2 text-sm font-medium"
+              disabled={authBusy}
+              className="flex-1 rounded bg-foreground text-background px-4 py-2 text-sm font-medium disabled:opacity-50"
             >
               {strings.report.consent.submitButton}
             </button>
@@ -367,8 +408,15 @@ export function DraftReviewCard({ draft }: { draft: ComplaintDraft }) {
             {authBusy ? strings.report.auth.verifying : strings.report.auth.verifyButton}
           </button>
           <div className="flex justify-between text-xs">
-            <button type="button" onClick={handleRequestOtp} className="underline">
-              {strings.report.auth.resendButton}
+            <button
+              type="button"
+              onClick={handleRequestOtp}
+              disabled={authBusy || resendSecondsRemaining > 0}
+              className="underline disabled:opacity-50 disabled:no-underline"
+            >
+              {resendSecondsRemaining > 0
+                ? strings.report.auth.resendIn(resendSecondsRemaining)
+                : strings.report.auth.resendButton}
             </button>
             <button
               type="button"

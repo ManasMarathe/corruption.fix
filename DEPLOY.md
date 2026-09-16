@@ -8,7 +8,11 @@ Production topology:
   pipeline connect through the **session-mode pooler** (port `5432`).
 - **Resend** — OTP verification emails.
 - **GitHub Actions** — `.github/workflows/jobs.yml` hits `/api/jobs/*`
-  every 30 minutes (stats refresh, checkpoint signing, thresholds).
+  hourly (stats refresh, checkpoint signing, thresholds), and
+  `.github/workflows/ci.yml` is the **only** path to production: on a push
+  to `main` it tests, migrates, then deploys. Vercel's own git auto-deploy
+  for `main` is switched off in `web/vercel.json` so a build can never race
+  the migration.
 
 Map tiles need no separate infrastructure: `web/public/tiles/offices.pmtiles`
 (~1.5 MB) deploys with the app, and the basemap is served by
@@ -31,11 +35,11 @@ Map tiles need no separate infrastructure: `web/public/tiles/offices.pmtiles`
 
 ```sh
 cd web
-DATABASE_URL="$SESSION_URL" npm run db:migrate
+DATABASE_URL="$SESSION_URL" pnpm db:migrate
 
 cd ../pipeline
 # If data/ is already populated from a local run, skip download/extract.
-DATABASE_URL="$SESSION_URL" npm run import
+DATABASE_URL="$SESSION_URL" pnpm run import
 ```
 
 Then trigger one stats refresh (or just wait for the first cron run) so
@@ -107,18 +111,32 @@ console-mailer fallback is dev-only).
    real contact route — Nominatim's usage policy discourages
    autocomplete-rate querying, and it blocks by IP, which Vercel functions
    share across projects.
-4. Deploy. Subsequent pushes to `main` auto-deploy; PRs get preview URLs.
+4. Deploy once from the dashboard to create the project. **After that, do
+   not rely on Vercel's git integration for `main`** — it is disabled in
+   `web/vercel.json`. Production deploys happen only through
+   `.github/workflows/ci.yml`, which needs the repository secrets in step 6.
+   PRs and non-`main` branches still get Vercel preview URLs as usual.
 
 ## 6. Scheduled jobs (GitHub repo settings)
 
 In the GitHub repo, **Settings → Secrets and variables → Actions**:
 
-- Secret `JOB_SECRET` — same value as on Vercel.
-- Variable `APP_URL` — the deployed origin, e.g.
-  `https://corruption-fix.vercel.app` (no trailing slash).
+| kind | name | value |
+|---|---|---|
+| Secret | `JOB_SECRET` | same value as on Vercel |
+| Secret | `PROD_DATABASE_URL` | `$SESSION_URL` (session pooler, port **5432**) — used by the migrate job |
+| Secret | `VERCEL_TOKEN` | a Vercel access token with deploy rights on the project |
+| Variable | `APP_URL` | the deployed origin, e.g. `https://corruption-fix.vercel.app` (no trailing slash) |
 
-The workflow skips cleanly until `APP_URL` is set, so enabling it later is
-fine. Test it from the Actions tab via **Run workflow**.
+`JOB_SECRET` + `APP_URL` are what the hourly **Scheduled Jobs** workflow
+needs; it skips cleanly until `APP_URL` is set, so enabling it later is fine.
+Test it from the Actions tab via **Run workflow**.
+
+`PROD_DATABASE_URL` + `VERCEL_TOKEN` are what **CI & Deploy** needs. Without
+them every push to `main` fails with an explicit error and production stays
+on the last good deploy — safe, but nothing ships. Note the port: migrations
+need the **session** pooler (5432), not the transaction pooler (6543) that
+`DATABASE_URL` uses on Vercel; `web/scripts/migrate.mjs` refuses 6543 by name.
 
 ## 7. Post-deploy smoke test
 

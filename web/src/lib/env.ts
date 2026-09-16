@@ -33,6 +33,12 @@ const rawEnvSchema = z.object({
   // generate both together via scripts/generate-signing-key.mjs.
   CHECKPOINT_PUBLIC_KEY: hex64.optional(),
   JOB_SECRET: z.string().min(1).optional(),
+  // Reserved for session-token derivation. Required (and validated) in every
+  // environment so a deployment can't be stood up without one, but NOT read
+  // by src/lib/session.ts today: session ids are sha256(random 32 bytes),
+  // which needs no server-side secret. Keying that digest with this value
+  // would invalidate every live session on the deploy that did it, so it is
+  // a deliberate choice, not an oversight — see web/README.md.
   SESSION_SECRET: z.string().min(1, "SESSION_SECRET is required"),
   // OTP email delivery. Genuinely optional in all environments: when unset
   // (or outside production) the console mailer transport is used instead of

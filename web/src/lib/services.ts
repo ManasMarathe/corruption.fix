@@ -10,7 +10,7 @@ import type { OfficeService } from "@/db/schema";
  * *type* is imported, and types are erased at compile time.
  *
  * `SERVICE_LIST` is checked against the schema's array by
- * services.test.ts, so the two cannot drift silently.
+ * enum-mirrors.test.ts, so the two cannot drift silently.
  */
 export const SERVICE_LIST: OfficeService[] = [
   "aadhaar",

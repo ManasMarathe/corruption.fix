@@ -255,7 +255,7 @@ export async function tombstoneEntry(
     .set({
       removedAt: new Date(),
       removalReason: reason,
-      orderRef: orderRef ?? undefined,
+      orderRef,
     })
     .where(eq(chainEntries.complaintId, complaintId));
 }

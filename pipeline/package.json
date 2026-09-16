@@ -2,6 +2,7 @@
   "name": "corruptionfix-pipeline",
   "version": "1.0.0",
   "private": true,
+  "packageManager": "pnpm@12.4.2",
   "type": "module",
   "description": "Seed-data pipeline: OSM -> offices table + vector tiles for CorruptionFix.",
   "scripts": {
@@ -11,7 +12,7 @@
     "tiles": "bash 04-tiles.sh",
     "sources": "node 05-sources/fetch-all.mjs",
     "merge": "node 06-merge.mjs",
-    "all": "npm run download && npm run extract && npm run import && npm run tiles",
+    "all": "pnpm run download && pnpm run extract && pnpm run import && pnpm run tiles",
     "test": "node --test lib/*.test.mjs 05-sources/*.test.mjs"
   },
   "dependencies": {

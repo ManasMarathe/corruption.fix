@@ -43,12 +43,28 @@ export function extractIdType(feature) {
 //     itself, which shows up almost as often as the full translated name.
 const RTO_NAME_RE = /RTO|Regional Transport|परिवहन|आरटीओ/i;
 
+// Suffix nameFor() appends when an office has no usable name of its own.
+// Shared with isFallbackName() below so the two can't drift apart.
+const UNNAMED_SUFFIX = " (unnamed)";
+
 /** True when `tags` carries a real place name (vs. relying on the "(unnamed)"
- * fallback in nameFor()). Exported so lib/prepare-tiles-geojson.mjs can bias
- * tippecanoe's dot-dropping to keep named features first — see 04-tiles.sh. */
+ * fallback in nameFor()). */
 export function hasName(tags) {
   const raw = tags.name || tags["name:en"];
   return Boolean(raw && raw.trim());
+}
+
+/**
+ * The `hasName` question asked of a stored `offices.name` rather than of raw
+ * OSM tags: true when the name is nameFor()'s "<Label> (unnamed)" fallback.
+ *
+ * lib/prepare-tiles-geojson.mjs builds tiles from the `offices` table, where
+ * the fallback has already been applied and the original tags are long gone —
+ * but it still needs to know which features carry a real name so it can bias
+ * tippecanoe's dot-dropping toward keeping those. See 04-tiles.sh.
+ */
+export function isFallbackName(name) {
+  return String(name ?? "").trim().endsWith(UNNAMED_SUFFIX);
 }
 
 /** OSM tags -> one of offices.category, or null if nothing matches. */
@@ -83,7 +99,7 @@ export function nameFor(tags, category) {
   const raw = tags.name || tags["name:en"];
   if (raw && raw.trim()) return raw.trim();
   const label = CATEGORY_LABELS[category] || "Office";
-  return `${label} (unnamed)`;
+  return `${label}${UNNAMED_SUFFIX}`;
 }
 
 export function addressFor(tags) {

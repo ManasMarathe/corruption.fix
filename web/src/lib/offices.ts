@@ -55,6 +55,16 @@ const OFFICE_POINT_COLUMNS = {
   ), '{}')`,
 };
 
+/**
+ * Escapes the three characters LIKE treats as syntax so a typed query is
+ * matched literally. Without this, "%" matches every office in the table
+ * (and forces a sequential scan past the pg_trgm index), and "_" silently
+ * matches any single character.
+ */
+function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, (char) => `\\${char}`);
+}
+
 export async function searchOffices(
   query: string,
   limit: number
@@ -62,7 +72,7 @@ export async function searchOffices(
   const rows = await db
     .select(OFFICE_POINT_COLUMNS)
     .from(offices)
-    .where(ilike(offices.name, `%${query}%`))
+    .where(ilike(offices.name, `%${escapeLikePattern(query)}%`))
     .limit(limit);
   return rows as OfficePoint[];
 }

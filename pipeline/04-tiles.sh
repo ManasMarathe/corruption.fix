@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
-# Step 4: build web/public/tiles/offices.pmtiles from the extracted GeoJSON.
+# Step 4: build web/public/tiles/offices.pmtiles from the `offices` table.
 # This is the ONE file this pipeline writes under web/ — everything else
 # stays inside pipeline/.
+#
+# Note the input: lib/prepare-tiles-geojson.mjs reads Postgres, NOT
+# data/india-offices.geojsonseq. That is what makes offices with no OSM
+# presence (everything steps 5-6 import) reachable by the map — see the
+# header comment in that script. So this step needs a populated database
+# (DATABASE_URL, same convention as 03-import.mjs), not an OSM extract on
+# disk; run step 3 (and optionally 5-6) first.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -10,14 +17,11 @@ command -v tippecanoe >/dev/null 2>&1 || {
   exit 1
 }
 
-IN="data/india-offices.geojsonseq"
 PREPARED="data/india-offices.tiles.geojsonseq"
 OUT_DIR="../web/public/tiles"
 OUT="$OUT_DIR/offices.pmtiles"
 
-[ -f "$IN" ] || { echo "$IN missing — run 02-extract.sh first" >&2; exit 1; }
-
-echo "== preparing tile GeoJSON (osm_uid, name, category, services, precision, has_reports) =="
+echo "== preparing tile GeoJSON (id, osm_uid, name, category, services, precision, has_reports) =="
 node lib/prepare-tiles-geojson.mjs
 
 mkdir -p "$OUT_DIR"
@@ -42,8 +46,10 @@ echo "== tippecanoe =="
 #   not the previous behavior where -zg's guessed maxzoom silently dropped
 #   ~25k features at every zoom 0-9 with no way to tell what was lost.
 # -y ...: allowlist exactly the properties the map/filter panel reads
-#   (see web/src/lib/offices.ts and the map filter panel) — keeps tiles
-#   smaller than osmium's full OSM tag set would.
+#   (see web/src/components/map/MapHome.tsx and MapFilterPanel.tsx) — keeps
+#   tiles smaller than the full column set would. `id` is the office uuid,
+#   which lets a clicked pin link straight to /office/<id> instead of
+#   round-tripping through /api/offices/lookup?osm_uid=.
 tippecanoe \
   --force \
   -o "$OUT" \
@@ -51,7 +57,7 @@ tippecanoe \
   -z13 \
   --extend-zooms-if-still-dropping \
   --drop-densest-as-needed \
-  -y osm_uid -y name -y category -y services -y precision -y has_reports \
+  -y id -y osm_uid -y name -y category -y services -y precision -y has_reports \
   "$PREPARED"
 
 echo
