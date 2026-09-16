@@ -190,4 +190,10 @@ jobs:
       # inject the real values. The repo-root .vercelignore is what keeps
       # pipeline/ out of the upload.
       - name: Deploy to production
-        run: pnpm dlx vercel@latest deploy --prod --yes --token=${{ secrets.VERCEL_TOKEN }}
+        # --allow-build=esbuild: the Vercel CLI bundles esbuild, whose
+        # postinstall pnpm blocks by default, and a blocked build is a hard
+        # error (ERR_PNPM_IGNORED_BUILDS) rather than a warning. The
+        # allowlist in web/pnpm-workspace.yaml does not apply here — dlx
+        # resolves into its own temp store, and this job runs from the repo
+        # root, not web/.
+        run: pnpm dlx --allow-build=esbuild vercel@latest deploy --prod --yes --token=${{ secrets.VERCEL_TOKEN }}
