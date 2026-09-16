@@ -18,15 +18,16 @@
 //
 // Properties written, all of them in 04-tiles.sh's `-y` allowlist:
 //
-//   id          offices.id (uuid). Present on every feature. This is what
-//               lets a clicked pin link straight to /office/<id>; the web
-//               map reads `properties.id` first and only falls back to the
-//               osm_uid lookup round-trip when it is absent.
-//   osm_uid     OSM-sourced rows only. offices.osm_id already holds the
+//   osm_uid     OSM-sourced rows. offices.osm_id already holds the
 //               lib/osmuid.mjs-encoded value (03-import.mjs writes it that
-//               way), so it is copied straight across — this keeps the
-//               /api/offices/lookup?osm_uid= path working for clients and
-//               tiles that predate the `id` property.
+//               way), so it is copied straight across and the pin resolves
+//               through /api/offices/lookup?osm_uid=.
+//   id          offices.id (uuid), written ONLY for rows with no osm_id —
+//               i.e. everything the government-dataset import creates, which
+//               has no other way to be identified. See featureForRow for why
+//               it is not written for every feature (it costs 9x in tile
+//               size). The map reads `properties.id` first and falls back to
+//               the osm_uid lookup.
 //   name        offices.name as stored (nameFor() already applied at import).
 //   category    offices.category.
 //   services    comma-joined office_services rows; omitted when empty.
@@ -75,14 +76,29 @@ export function featureForRow(row) {
   if (!Number.isFinite(lng) || !Number.isFinite(lat)) return null;
 
   const properties = {
-    id: row.id,
     name: row.name,
     category: row.category,
   };
 
+  // Exactly ONE identifier per feature, and osm_uid is preferred because it
+  // is a number rather than a 36-character uuid.
+  //
+  // That sounds like a micro-optimisation and is not: every named feature
+  // carries tippecanoe.minzoom 0 (see below), so it is replicated into all
+  // 14 zoom levels, and a uuid is high-entropy enough that the string pool
+  // cannot dedupe it. Emitting `id` for all ~25k OSM rows measured at 14.2MB
+  // of tiles against 1.5MB for osm_uid alone — a 9x cost paid on every pan,
+  // to save one hard-cached /api/offices/lookup call per pin click.
+  //
+  // Rows with no osm_id — everything the government-dataset import creates —
+  // have nothing else to be found by, so those do carry the uuid. They are
+  // the minority, and the map reads `properties.id` first either way.
+  //
   // osm_id is int8; postgres.js hands int8 back as a string, hence Number().
   if (row.osm_id !== null && row.osm_id !== undefined) {
     properties.osm_uid = Number(row.osm_id);
+  } else {
+    properties.id = row.id;
   }
   if (Array.isArray(row.services) && row.services.length > 0) {
     properties.services = row.services.join(",");

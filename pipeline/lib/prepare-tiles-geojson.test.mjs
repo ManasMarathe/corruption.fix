@@ -23,23 +23,33 @@ const baseRow = {
 };
 
 describe("featureForRow", () => {
-  test("always carries id, name and category, and a Point geometry", () => {
+  test("always carries name, category, and a Point geometry", () => {
     const feature = featureForRow(baseRow);
     assert.equal(feature.type, "Feature");
     assert.deepEqual(feature.geometry, {
       type: "Point",
       coordinates: [72.8777, 19.076],
     });
-    assert.equal(feature.properties.id, baseRow.id);
     assert.equal(feature.properties.name, baseRow.name);
     assert.equal(feature.properties.category, "post_office");
   });
 
-  test("omits osm_uid for non-OSM rows and coerces it to a number otherwise", () => {
-    assert.equal("osm_uid" in featureForRow(baseRow).properties, false);
+  // Exactly one identifier per feature. Emitting the uuid on every row
+  // measured at 9x the tile size, because tippecanoe.minzoom 0 replicates
+  // named features across all 14 zoom levels — so OSM rows carry only the
+  // compact numeric osm_uid, and the uuid is reserved for rows that have
+  // nothing else to be found by.
+  test("an OSM row carries osm_uid as a number and no uuid", () => {
     // postgres.js returns int8 as a string; the tiles must carry a number.
     const osm = featureForRow({ ...baseRow, osm_id: "10000000123" });
     assert.equal(osm.properties.osm_uid, 10_000_000_123);
+    assert.equal("id" in osm.properties, false);
+  });
+
+  test("a row with no osm_id falls back to the office uuid", () => {
+    const imported = featureForRow(baseRow);
+    assert.equal(imported.properties.id, baseRow.id);
+    assert.equal("osm_uid" in imported.properties, false);
   });
 
   test("joins services with commas and omits the property when there are none", () => {
