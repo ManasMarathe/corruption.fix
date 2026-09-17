@@ -12,3 +12,15 @@ allowBuilds:
 #   esbuild        — the bundler behind vitest and drizzle-kit; its postinstall
 #                    links the platform binary.
 #   unrs-resolver  — native resolver used by eslint-config-next's import plugin.
+# Versions exempted from the registry-wide minimum-release-age gate, added
+# when the complaint chat moved from the Vercel AI Gateway to Groq. The five
+# travel together: @ai-sdk/groq pins an exact @ai-sdk/provider, and `ai` must
+# resolve to the SAME copy or tsc rejects the model as two structurally
+# identical but distinct LanguageModelV4 types. Drop these entries once the
+# versions age past the gate on their own.
+minimumReleaseAgeExclude:
+  - '@ai-sdk/groq@4.0.44'
+  - '@ai-sdk/provider-utils@5.0.43'
+  - '@ai-sdk/provider@4.0.17'
+  - '@ai-sdk/gateway@4.0.85'
+  - ai@7.0.105

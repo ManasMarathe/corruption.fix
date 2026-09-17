@@ -1,4 +1,5 @@
 import { type NextRequest } from "next/server";
+import { groq } from "@ai-sdk/groq";
 import {
   convertToModelMessages,
   createUIMessageStreamResponse,
@@ -25,9 +26,9 @@ const DAILY_LIMIT = { max: 200, windowSec: 24 * 60 * 60 };
 const MAX_MESSAGES = 40;
 const MAX_BODY_BYTES = 32 * 1024;
 
-// The complaint chat assistant. Streams model output (via the Vercel AI
-// Gateway — OIDC on Vercel, AI_GATEWAY_API_KEY locally) back to useChat.
-// Transcripts are never persisted server-side.
+// The complaint chat assistant. Streams model output (via Groq, keyed by
+// GROQ_API_KEY) back to useChat. Transcripts are never persisted
+// server-side.
 export async function POST(request: NextRequest) {
   if (!checkOrigin(request)) {
     return errorResponse(403, "bad_origin", strings.chat.errors.badOrigin);
@@ -67,7 +68,11 @@ export async function POST(request: NextRequest) {
 
   try {
     const result = streamText({
-      model: "anthropic/claude-sonnet-5",
+      // Groq's strongest tool-calling model on this account, and the only
+      // tier with room for the system prompt plus a long conversation
+      // (131K context). The three tools below are the whole job, so
+      // tool-call reliability matters more here than prose quality.
+      model: groq("openai/gpt-oss-120b"),
       instructions: CHAT_SYSTEM_PROMPT,
       messages: await convertToModelMessages(messages),
       tools: chatTools,

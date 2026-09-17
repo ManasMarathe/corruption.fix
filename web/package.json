@@ -15,8 +15,9 @@
     "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
+    "@ai-sdk/groq": "4.0.44",
     "@ai-sdk/react": "^4.0.86",
-    "ai": "^7.0.83",
+    "ai": "^7.0.105",
     "drizzle-orm": "^0.45.2",
     "maplibre-gl": "^5.24.0",
     "next": "15.5.24",

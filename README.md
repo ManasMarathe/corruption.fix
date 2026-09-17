@@ -57,7 +57,7 @@ Defined and validated in `web/src/lib/env.ts`. See `web/.env.example` for a fill
 | `CHECKPOINT_PUBLIC_KEY` | no | 64-char hex (32 bytes) | Public half of `CHECKPOINT_SIGNING_KEY`, produced by the same script. Safe to publish — shown on `/transparency` so anyone can independently verify checkpoint signatures. |
 | `JOB_SECRET` | production only | non-empty string | Bearer token required by `/api/jobs/*` routes, called by the scheduled GitHub Actions workflow. Falls back to an insecure dev default outside production (with a warning) if unset. |
 | `SESSION_SECRET` | always | non-empty string | Reserved for session-token derivation. Required in every environment, but not read by `src/lib/session.ts` today — session ids are `sha256(32 random bytes)`, which needs no server-side secret. See the comment in `web/src/lib/env.ts`. |
-| `AI_GATEWAY_API_KEY` | no | non-empty string | Vercel AI Gateway key for the complaint chat assistant (`/api/chat`). Only needed for local dev — on Vercel the gateway authenticates via OIDC. |
+| `GROQ_API_KEY` | no | non-empty string | Groq key for the complaint chat assistant (`/api/chat`), from <https://console.groq.com>. Needed in every environment where chat should work, production included; boot does not depend on it, so when unset only `/api/chat` fails. |
 | `NODE_ENV` | always | `development` \| `test` \| `production` | Defaults to `development`. |
 
 Generate a fresh hex key with:

@@ -92,16 +92,20 @@ console-mailer fallback is dev-only).
    | `CHECKPOINT_SIGNING_KEY` | generated above |
    | `CHECKPOINT_PUBLIC_KEY` | generated above |
    | `JOB_SECRET` | generated above |
+   | `GROQ_API_KEY` | from Groq |
    | `RESEND_API_KEY` | from Resend |
    | `EMAIL_FROM` | e.g. `CorruptionFix <no-reply@yourdomain.org>` |
 
    `NODE_ENV` is set by Vercel automatically. `web/src/lib/env.ts` fails the
    boot loudly if a required production variable is missing.
 
-   The complaint chat assistant (`/api/chat`) uses the Vercel AI Gateway.
-   On Vercel it authenticates via OIDC automatically — no variable needed;
-   for local dev, set `AI_GATEWAY_API_KEY` in `web/.env.local` (create a
-   key under AI Gateway → API Keys in the Vercel dashboard).
+   The complaint chat assistant (`/api/chat`) runs on **Groq**
+   (`openai/gpt-oss-120b`). Create a key at <https://console.groq.com> →
+   API Keys and set `GROQ_API_KEY` — in Vercel for production, and in
+   `web/.env.local` for local dev. It is not validated as required at boot
+   (`web/src/lib/env.ts` keeps it optional on purpose, so a missing chat key
+   can never take the whole site down), which means a wrong or absent value
+   shows up only as a failing `/api/chat`.
 
    The map's "where are you?" prompt geocodes place names through
    `/api/geocode`, which defaults to the public OSM Nominatim instance and
